@@ -1,0 +1,22 @@
+{
+  "name": "nu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "nu — a deterministic artificial-life simulation platform with a stage-1 engine and browser lab (spec Parts 11-19)",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "nu": "bun run src/cli.ts",
+    "build:lab": "node scripts/build-lab.mjs",
+    "serve:lab": "node scripts/serve-lab.mjs",
+    "build": "node scripts/build-lab.mjs",
+    "deploy:vercel": "bunx vercel deploy --prod --yes",
+    "deploy:vercel:local": "bunx vercel deploy --yes"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.6.0"
+  }
+}

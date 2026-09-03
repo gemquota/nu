@@ -1,0 +1,5 @@
+{
+  "buildCommand": "node scripts/build-lab.mjs",
+  "outputDirectory": "dist",
+  "framework": null
+}

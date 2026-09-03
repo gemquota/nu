@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nu — artificial life lab</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="hud">
+        <div class="brandline">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <circle cx="12" cy="12" r="8" />
+              <circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none" />
+            </svg>
+          </span>
+          <h1>nu</h1>
+          <span class="tag">artificial life lab</span>
+        </div>
+        <div class="stats" aria-live="polite">
+          <span>fps <b id="stat-fps">0</b></span>
+          <span>tick <b id="stat-tick">0</b></span>
+          <span>pop <b id="stat-pop">0</b></span>
+          <span>births <b id="stat-births">0</b></span>
+          <span>deaths <b id="stat-deaths">0</b></span>
+          <span>field <b id="stat-field">0</b></span>
+          <span>mature <b id="stat-maturity">—</b></span>
+          <span>diversity <b id="stat-diversity">—</b></span>
+        </div>
+      </header>
+
+      <main>
+        <div id="viewport">
+          <canvas id="canvas" width="960" height="640" aria-label="Artificial life world"></canvas>
+          <div id="flash" role="status"></div>
+
+          <div id="dock" class="hud-panel">
+            <div class="dock-group" role="group" aria-label="Run controls">
+              <button id="btn-pause" class="dctl" type="button" data-tip="Pause / resume" aria-pressed="false">
+                <svg class="ic ic-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 5v14M15 5v14"/></svg>
+                <svg class="ic ic-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></svg>
+              </button>
+              <button id="btn-reset" class="dctl danger-hover" type="button" data-tip="Reset world">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.5 15a9 9 0 1 0 .5-6.5L1 10"/></svg>
+              </button>
+              <button id="btn-checkpoint" class="dctl" type="button" data-tip="Export checkpoint">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M7 10l5 5 5-5"/><path d="M4 20h16"/></svg>
+              </button>
+            </div>
+
+            <span class="dock-sep" aria-hidden="true"></span>
+
+            <div class="dock-group" role="group" aria-label="Pointer tools">
+              <button id="tool-inspect" class="dctl active" type="button" data-tip="Inspect (click a cell)">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="6.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/></svg>
+              </button>
+              <button id="tool-spawn" class="dctl" type="button" data-tip="Spawn founder">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 8.5v7M8.5 12h7"/></svg>
+              </button>
+              <button id="tool-cull" class="dctl danger-hover" type="button" data-tip="Cull (strike nearby cells)">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M13 2 4 13.5h6L10 22l9.5-11.5h-6.5L13 2z"/></svg>
+              </button>
+              <button id="tool-pan" class="dctl" type="button" data-tip="Pan (or drag / pinch)">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M2 12h20"/><path d="m9 5 3-3 3 3M9 19l3 3 3-3M5 9l-3 3 3 3M19 9l3 3-3 3"/></svg>
+              </button>
+            </div>
+
+            <span class="dock-sep" aria-hidden="true"></span>
+
+            <div class="dock-group" role="group" aria-label="View controls">
+              <button id="btn-zoom-out" class="dctl" type="button" data-tip="Zoom out">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7.5"/><path d="m21 21-4.6-4.6M8 11h6"/></svg>
+              </button>
+              <button id="btn-zoom-in" class="dctl" type="button" data-tip="Zoom in">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7.5"/><path d="m21 21-4.6-4.6M11 8v6M8 11h6"/></svg>
+              </button>
+              <button id="btn-fit" class="dctl" type="button" data-tip="Fit world (0)">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.5H5.5a2 2 0 0 0-2 2V8M16 3.5h2.5a2 2 0 0 1 2 2V8M8 20.5H5.5a2 2 0 0 1-2-2V16M16 20.5h2.5a2 2 0 0 0 2-2V16"/></svg>
+              </button>
+              <button id="btn-fullscreen" class="dctl" type="button" data-tip="Fullscreen">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+              </button>
+            </div>
+
+            <span class="dock-sep" aria-hidden="true"></span>
+
+            <div class="dock-group speed-group" role="group" aria-label="Simulation speed">
+              <span class="speed-label">spd</span>
+              <input id="speed" type="range" min="0" max="12" value="2" />
+              <b id="speed-val">2×</b>
+            </div>
+          </div>
+
+          <details id="layers" class="hud-panel">
+            <summary aria-label="Toggle layer visibility">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="m12 2.5-9.5 5L12 12.5l9.5-5-9.5-5z"/><path d="m2.5 12 9.5 5 9.5-5"/><path d="m2.5 17 9.5 5 9.5-5"/></svg>
+              <span>layers</span>
+            </summary>
+            <div class="layer-list">
+              <label><input id="show-field" type="checkbox" checked /> field</label>
+              <label><input id="show-resources" type="checkbox" checked /> resources</label>
+              <label><input id="show-organisms" type="checkbox" checked /> organisms</label>
+            </div>
+          </details>
+
+          <button id="btn-drawer" class="drawer-toggle" type="button" aria-controls="drawer" aria-expanded="true" title="Hide panel">
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+        </div>
+
+        <aside id="drawer" class="drawer open" aria-label="Lab controls and data">
+          <div class="drawer-head">
+            <div>
+              <span class="eyebrow">research console</span>
+              <strong id="drawer-title">Telemetry</strong>
+            </div>
+            <span class="model-badge">nu-core-v2</span>
+          </div>
+          <nav class="tabs" aria-label="Lab panel tabs">
+            <button class="tab active" data-tab="telemetry" type="button">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              <span>Telemetry</span>
+            </button>
+            <button class="tab" data-tab="parameters" type="button">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 21v-6M4 9V3M12 21v-9M12 6V3M20 21v-4M20 11V3"/><path d="M1.5 15h5M9.5 6h5M17.5 17h5"/></svg>
+              <span>Parameters</span>
+            </button>
+            <button class="tab" data-tab="data" type="button">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><ellipse cx="12" cy="5" rx="8.5" ry="3"/><path d="M3.5 5v14c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3V5"/><path d="M3.5 12c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3"/></svg>
+              <span>Data</span>
+            </button>
+            <button class="tab" data-tab="coverage" type="button">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-3.5 8-10V5.5L12 2.5 4 5.5V12c0 6.5 8 10 8 10z"/><path d="m8.8 11.8 2.3 2.3 4.2-4.4"/></svg>
+              <span>Coverage</span>
+            </button>
+          </nav>
+
+          <div class="drawer-scroll">
+            <section class="tab-panel active" data-panel="telemetry">
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">live observables</span>
+                  <h2>Trajectory</h2>
+                </div>
+                <span class="sample-count" id="sample-count">0 samples</span>
+              </div>
+              <div class="chart-bar">
+                <label class="chart-field">window
+                  <select id="chart-window" class="chart-select" title="Timeframe shown on the charts">
+                    <option value="60">60 ticks</option>
+                    <option value="180">180 ticks</option>
+                    <option value="360" selected>360 ticks</option>
+                    <option value="720">720 ticks</option>
+                  </select>
+                </label>
+                <button id="chart-stack-all" class="mini-btn" type="button" title="Overlay every series into one stacked chart">stack all</button>
+                <button id="chart-split-all" class="mini-btn" type="button" title="Restore one chart per series">split</button>
+              </div>
+              <div id="charts-root" class="charts"></div>
+
+              <section id="organism-panel" class="organism-panel" hidden>
+                <div class="panel-heading compact">
+                  <div>
+                    <span class="eyebrow">selection</span>
+                    <h2>Organism</h2>
+                  </div>
+                  <button id="clear-selection" class="text-button" type="button">Clear</button>
+                </div>
+                <div id="organism-body"></div>
+              </section>
+            </section>
+
+            <section class="tab-panel" data-panel="parameters" hidden>
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">declarative run definition</span>
+                  <h2>Parameters</h2>
+                </div>
+              </div>
+              <p class="panel-note">Apply a new definition to reset the world and start a reproducible run from the selected seed.</p>
+              <form id="parameters-form">
+                <label class="field wide"><span>seed</span><input id="param-seed" type="text" value="lab-session-v1" /></label>
+                <div id="param-accordion"></div>
+                <button class="apply-button" type="submit">Apply parameters and reset</button>
+              </form>
+            </section>
+
+            <section class="tab-panel" data-panel="data" hidden>
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">authoritative readout</span>
+                  <h2>Data</h2>
+                </div>
+              </div>
+              <div id="data-summary" class="data-list"></div>
+              <h3>Last committed events</h3>
+              <div id="events-summary" class="event-list"></div>
+              <h3>Checkpoint</h3>
+              <p id="checkpoint-summary" class="panel-note">No checkpoint saved in this session.</p>
+            </section>
+
+            <section class="tab-panel" data-panel="coverage" hidden>
+              <div class="panel-heading">
+                <div>
+                  <span class="eyebrow">specification audit</span>
+                  <h2>Implementation coverage</h2>
+                </div>
+              </div>
+              <p class="panel-note">This matrix is intentionally conservative: documentation and reference material are not counted as runtime behavior, and stage-1 mechanisms are labeled as partial.</p>
+              <div class="coverage-list">
+                <div class="coverage-row"><b>Parts 11–13 · Kernel &amp; state</b><span class="status implemented">Implemented</span><small>System contracts, authoritative world state with derived spatial index, nine-phase deterministic kernel, buffered deltas with rollback, named RNG streams, headless CLI runner, and checkpoint serialize/restore are live and tested.</small></div>
+                <div class="coverage-row"><b>Part 14 · Genetics</b><span class="status implemented">Implemented</span><small>Multi-layer gene registry (REGULATION/MORPHOLOGY/BEHAVIOUR/NEURAL), all four mutation operators (point, deletion, duplication, regulatory rewiring), optional sexual recombination with genome + brain crossover, and lineage heredity are live and tested.</small></div>
+                <div class="coverage-row"><b>Part 15 · Development</b><span class="status implemented">Implemented</span><small>Construction-queue development over surface-node modules, molecule-paid construction and maturation with phenotype scaling, and canalization as a domain transition (DevelopmentCompleted) are live and tested.</small></div>
+                <div class="coverage-row"><b>Part 16 · Behaviour</b><span class="status implemented">Implemented</span><small>Formal observation records assembled from the node body (occlusion-aware photoreceptor raycasts, chemo/mech sensing, day/night), recurrent short-term memory, lifetime Hebbian plasticity, proposal intents, and world-resolved consequences are live and tested.</small></div>
+                <div class="coverage-row"><b>Part 17 · Ecology &amp; environment</b><span class="status implemented">Implemented</span><small>Multi-field environment (pheromone + temperature + chemical), terrain elevation with water basins, hex-derived organic barrier walls, day/night cycle, strict conservation ledger, full interaction records, corpse ecology, niche construction, ProtoEvo complex-molecule economy (biosynthesis, collection, scavenging, theft, node upgrades), and plant cluster bodies (orb clusters that grow, deplete under grazing, and shed spores that settle into new clusters) are live and tested.</small></div>
+                <div class="coverage-row"><b>Part 18 · Evolution &amp; selection</b><span class="status implemented">Implemented</span><small>Ecological selection with no stored fitness field, full lineage observables (descendants, survival, founder shares, extinction), genome-cluster species, neutral-drift tests, and optional auditable direct selection are live and tested.</small></div>
+                <div class="coverage-row"><b>Part 19 · Experiment &amp; replication</b><span class="status implemented">Implemented</span><small>Independent replicate seeds, aggregate statistics, checkpoint branching, declared config interventions, provenance, and branch-isolation tests are live. Broader analysis/persistence contracts await later parts.</small></div>
+                <div class="coverage-row"><b>Lab instrumentation</b><span class="status implemented">Implemented</span><small>Individual cell selection with nodal map, neural activation histograms, gene/environment colouration, tracking camera (🎥 follow mode), interactive stacked/paired trajectory charts with selectable timeframe, pinch-zoom + touch navigation, parameters accordion, data/event readouts, and checkpoint export are live in this presentation plane.</small></div>
+                <div class="coverage-row"><b>Parts 20–39</b><span class="status planned">Not written</span><small>Observation analysis, history, persistence, determinism framework, workers, performance, UI spec, validation, migration, and acceptance roadmap remain planned.</small></div>
+                <div class="coverage-row"><b>Audit + ProtoEvo docs</b><span class="status reference">Reference</span><small>These documents define analysis and source context; selected ProtoEvo mechanisms (molecule economy, plant bodies, death-as-resource) are represented in the runtime, but the documents themselves are not executable requirements.</small></div>
+              </div>
+            </section>
+          </div>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
