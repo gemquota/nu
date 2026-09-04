@@ -33,11 +33,11 @@ export const LEAF_DEPLETION_TICKS = 240;
 /** World-unit radius of a leaf orb (small — clusters read as attached orbs). */
 export const PLANT_ORB_RADIUS = 1.7;
 /**
- * Minimum centre-to-centre spacing between leaf orbs in a cluster. Slightly
- * above one orb diameter: neighbours touch and read as one plant body without
- * piling into an indistinct clump.
+ * Centre-to-centre spacing between leaf orbs in a cluster: exactly one orb
+ * diameter, so neighbouring leaves just touch and read as a single plant
+ * body without overlapping into a clump.
  */
-export const LEAF_MIN_SPACING = PLANT_ORB_RADIUS * 2.15;
+export const LEAF_MIN_SPACING = PLANT_ORB_RADIUS * 2.02;
 /**
  * Extra clearance a NEW leaf keeps from a DIFFERENT cluster, so distinct
  * plants don't merge into one blob (and their ids/clusters stay readable).
@@ -55,8 +55,31 @@ export const EAT_DISLODGE_PROBABILITY = 0.015;
 export const MAX_PLANT_CLUSTERS_SCALE = 4.0;
 /** A settling spore sprouts this many leaves. */
 export const SPORE_PLANT_LEAVES = 3;
-/** Drift ticks before a spore settles. */
+/**
+ * Drift ticks before a spore settles (baseline for a small world). Scaled by
+ * `sporeLifespanFor` so dispersal distance grows with the arena — a spore
+ * should be able to cross a meaningful fraction of the world, never landing
+ * next to its parent where a camped carnivore can farm it.
+ */
 export const SPORE_LIFESPAN = 40;
+/** Minimum scaled drift lifetime (ticks). */
+export const SPORE_LIFESPAN_MIN = 60;
+/** Scaled drift lifetime = world perimeter × this factor, capped. */
+export const SPORE_LIFESPAN_MAX = 320;
+/**
+ * Per-tick wind speed for drifting spores (world units/tick): a random-walk
+ * wander applied on top of the ejection velocity so spores roam instead of
+ * coasting a short ballistic arc.
+ */
+export const SPORE_WIND_SPEED = 0.45;
+/** Deterministic drift lifetime scaled from the world's perimeter. */
+export function sporeLifespanFor(width: number, height: number): number {
+  const perimeter = 2 * (Math.abs(width) + Math.abs(height));
+  return Math.round(clampRange(SPORE_LIFESPAN_MIN, SPORE_LIFESPAN_MAX, perimeter * 0.14));
+}
+function clampRange(lo: number, hi: number, v: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
 
 /** Deterministic wobble phase for a leaf id (0..2π) — used for draw-time wiggle. */
 export function wobblePhase(id: string): number {
@@ -107,6 +130,26 @@ export function makeSpore(
     sporeVx: vx,
     sporeVy: vy,
   };
+}
+
+/**
+ * Even ring placement for a plant body: leaves are spaced at exactly one
+ * orb diameter on concentric rings (so neighbours JUST TOUCH, never overlap
+ * and never leave gaps). Ring 0 is the centre; ring k holds 6k sites at
+ * hex-like packing — the same topology the growth system uses when it adds
+ * leaves on the spacing ring. Deterministic.
+ */
+export function leafRingPosition(index: number, spacing: number): { x: number; y: number } {
+  if (index === 0) return { x: 0, y: 0 };
+  let remaining = index - 1;
+  let ring = 1;
+  while (remaining >= ring * 6) {
+    remaining -= ring * 6;
+    ring++;
+  }
+  const ang = (remaining / (ring * 6)) * Math.PI * 2;
+  const rad = spacing * ring;
+  return { x: Math.cos(ang) * rad, y: Math.sin(ang) * rad };
 }
 
 /** Cluster id for a freshly settled plant. */

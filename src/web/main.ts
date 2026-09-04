@@ -16,7 +16,7 @@ import {
   INPUT,
   OUTPUT,
 } from "../world/body";
-import { axialCentre, dayPhase, daylight, Terrain } from "../world/terrain";
+import { axialCentre, dayPhase, daylight, Terrain, WALL_SPACING, WALL_HEX_RADIUS } from "../world/terrain";
 
 /**
  * Recompute the brain's sensory input vector for the selected organism the same
@@ -103,6 +103,10 @@ function brainInputFor(organism: OrganismRecord, world: World): number[] {
   input[INPUT.biomass] = Math.min(1, organism.biomass / 60);
   input[INPUT.daylight] = day;
   input[INPUT.aggression] = Math.max(-1, Math.min(1, organism.genome.genes.trophic));
+  // Terrain correlates (match the BehaviourSystem's input assembly).
+  input[INPUT.elevation] = Math.min(1, Math.max(0, world.elevationAt(organism.x, organism.y)));
+  input[INPUT.water] = Math.min(1, world.waterDepthAt(organism.x, organism.y) / 3);
+  input[INPUT.wallProximity] = world.wallProximityAt(organism.x, organism.y, organism.radius + 5);
   // Fold recurrent memory exactly like the behaviour system (leaky blend).
   for (const slot of [INPUT.light, INPUT.foodX, INPUT.foodY, INPUT.preyX, INPUT.preyY, INPUT.wallX, INPUT.wallY]) {
     input[slot] = Math.tanh(input[slot]! + (organism.memory[slot] ?? 0) * 0.25);
@@ -656,27 +660,111 @@ function renderBackground(): void {
   bctx.putImageData(image, 0, 0);
 
   const s = BG_SCALE;
-  // Walls are now read as more line-like barrier formations: long contiguous
-  // edges of the actual barrier polygons are drawn as continuous strokes plus
-  // a thin facet fill, so the formations read as connected lines/ridges rather
-  // than as isolated hexagons.
-  bctx.lineCap = "round";
-  bctx.lineJoin = "round";
-  for (const wall of terrain.wallPolygons) {
-    if (wall.vertices.length < 2) continue;
-    bctx.beginPath();
-    bctx.moveTo(wall.vertices[0]!.x * s, wall.vertices[0]!.y * s);
-    for (let i = 1; i < wall.vertices.length; i++) {
-      bctx.lineTo(wall.vertices[i]!.x * s, wall.vertices[i]!.y * s);
+  // Walls read as SOLID ROCK FORMATIONS: adjacent hex tiles are merged by
+  // drawing every tile without gaps and painting the union once, then facets
+  // (light top-left, dark bottom-right) and a few deterministic cracks give
+  // the formations a rocky, monolithic look instead of discrete hexes.
+  // Group tiles into contiguous formations first (deterministic id order).
+  const formationOf = new Map<string, string>();
+  const formations: string[][] = [];
+  const tileKey = (t: { x: number; y: number }): string => `${Math.round(t.x * 4)}:${Math.round(t.y * 4)}`;
+  const adjacency = new Map<string, string[]>();
+  const tiles = terrain.wallPolygons.map((w) => {
+    let cx = 0;
+    let cy = 0;
+    for (const v of w.vertices) { cx += v.x; cy += v.y; }
+    cx /= w.vertices.length;
+    cy /= w.vertices.length;
+    return { id: w.id, x: cx, y: cy };
+  });
+  for (const t of tiles) adjacency.set(tileKey(t), []);
+  const near = (a: { x: number; y: number }, b: { x: number; y: number }): boolean =>
+    Math.hypot(a.x - b.x, a.y - b.y) <= WALL_SPACING * 1.25;
+  for (let i = 0; i < tiles.length; i++) {
+    for (let j = i + 1; j < tiles.length; j++) {
+      if (!near(tiles[i]!, tiles[j]!)) continue;
+      adjacency.get(tileKey(tiles[i]!))!.push(tileKey(tiles[j]!));
+      adjacency.get(tileKey(tiles[j]!))!.push(tileKey(tiles[i]!));
     }
-    bctx.closePath();
-    // Line-like ridge: thin continuous stroke plus a very soft darker core.
-    bctx.strokeStyle = "rgba(74, 56, 44, 0.95)";
-    bctx.lineWidth = Math.max(1.1, 0.9 * s);
-    bctx.stroke();
-    bctx.strokeStyle = "rgba(44, 34, 26, 0.55)";
-    bctx.lineWidth = Math.max(0.7, 0.45 * s);
-    bctx.stroke();
+  }
+  const seen = new Set<string>();
+  for (const t of tiles) {
+    const key = tileKey(t);
+    if (seen.has(key)) continue;
+    const group: string[] = [];
+    const stack = [key];
+    while (stack.length) {
+      const k = stack.pop()!;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      group.push(k);
+      for (const n of adjacency.get(k) ?? []) if (!seen.has(n)) stack.push(n);
+    }
+    formations.push(group);
+    for (const k of group) formationOf.set(k, `f${formations.length - 1}`);
+  }
+  bctx.lineJoin = "round";
+  bctx.lineCap = "round";
+  // Paint each formation: body fill, then highlight/shadow facet strokes on
+  // each tile to sculpt the rock, then a shared rim.
+  for (const group of formations) {
+    const groupTiles = tiles.filter((t) => group.includes(tileKey(t)));
+    // Base body: fill every tile fully (union look).
+    bctx.beginPath();
+    for (const t of groupTiles) {
+      const poly = terrain.wallPolygons.find((w) => w.id === t.id);
+      if (!poly) continue;
+      bctx.moveTo(poly.vertices[0]!.x * s, poly.vertices[0]!.y * s);
+      for (let i = 1; i < poly.vertices.length; i++) bctx.lineTo(poly.vertices[i]!.x * s, poly.vertices[i]!.y * s);
+      bctx.closePath();
+    }
+    bctx.fillStyle = "#4a3a2c";
+    bctx.fill("nonzero");
+    // Sculpt facets: per-tile top-left highlight + bottom-right shadow.
+    for (const t of groupTiles) {
+      const poly = terrain.wallPolygons.find((w) => w.id === t.id);
+      if (!poly) continue;
+      const cx = t.x * s;
+      const cy = t.y * s;
+      bctx.strokeStyle = "rgba(122, 102, 78, 0.5)"; // sunlit facet
+      bctx.lineWidth = Math.max(1, 0.5 * s);
+      bctx.beginPath();
+      for (let i = 0; i < poly.vertices.length; i++) {
+        const a = poly.vertices[i]!;
+        const b2 = poly.vertices[(i + 1) % poly.vertices.length]!;
+        if (a.x * s < cx && a.y * s < cy) {
+          bctx.moveTo(a.x * s, a.y * s);
+          bctx.lineTo(b2.x * s, b2.y * s);
+        }
+      }
+      bctx.stroke();
+      bctx.strokeStyle = "rgba(26, 20, 15, 0.55)"; // shadow facet
+      bctx.beginPath();
+      for (let i = 0; i < poly.vertices.length; i++) {
+        const a = poly.vertices[i]!;
+        const b2 = poly.vertices[(i + 1) % poly.vertices.length]!;
+        if (a.x * s > cx || a.y * s > cy) {
+          bctx.moveTo(a.x * s, a.y * s);
+          bctx.lineTo(b2.x * s, b2.y * s);
+        }
+      }
+      bctx.stroke();
+    }
+    // Deterministic cracks: one per 2 tiles, seeded by formation index.
+    const crackCount = Math.max(1, Math.floor(groupTiles.length / 2));
+    bctx.strokeStyle = "rgba(20, 15, 11, 0.5)";
+    bctx.lineWidth = Math.max(0.8, 0.35 * s);
+    for (let c = 0; c < crackCount; c++) {
+      const t = groupTiles[(c * 2) % groupTiles.length]!;
+      const seed = c * 7919 + group.length * 104729;
+      const a1 = ((seed % 628) / 100);
+      const len = WALL_HEX_RADIUS * (0.7 + ((seed >> 3) % 50) / 100);
+      bctx.beginPath();
+      bctx.moveTo(t.x * s, t.y * s);
+      bctx.lineTo(t.x * s + Math.cos(a1) * len * s, t.y * s + Math.sin(a1) * len * s);
+      bctx.lineTo(t.x * s + Math.cos(a1 + 0.9) * len * 0.6 * s, t.y * s + Math.sin(a1 + 0.9) * len * 0.6 * s);
+      bctx.stroke();
+    }
   }
   bctx.lineCap = "butt";
   bctx.lineJoin = "miter";
@@ -870,15 +958,18 @@ function draw(): void {
       const margin = 4 + rpx;
       if (x < -margin || y < -margin || x > W + margin || y > H + margin) continue;
       const energy = Math.min(1, o.energy / 100);
-      // Trophic hue: herbivores green, carnivores red, generalists amber.
-      const hue = o.trophic === "carnivore" ? 8 : o.trophic === "herbivore" ? 120 : 42;
+      // Heritable pigment: the `hue` gene places the cell on a full colour
+      // wheel; saturation lightens with stored energy, so populations drift
+      // visually apart while individual vigour stays readable.
+      const baseHue = Math.round((o.genome.genes.hue ?? 0.33) * 360);
+      const hue = o.lifecycle === "DEAD" ? 0 : baseHue;
       if (rpx < 1.4) {
         // Cheap dot — one fillRect, no arc overhead at the far-zoom regime.
-        ctx2d.fillStyle = `hsl(${hue}, 60%, ${Math.round(38 + 22 * energy)}%)`;
+        ctx2d.fillStyle = `hsl(${hue}, 62%, ${Math.round(40 + 20 * energy)}%)`;
         ctx2d.fillRect(x - 0.7, y - 0.7, 1.4, 1.4);
         continue;
       }
-      ctx2d.fillStyle = `hsl(${hue}, ${Math.round(55 + 30 * energy)}%, ${Math.round(38 + 20 * energy)}%)`;
+      ctx2d.fillStyle = `hsl(${hue}, ${Math.round(58 + 26 * energy)}%, ${Math.round(40 + 18 * energy)}%)`;
       ctx2d.beginPath();
       ctx2d.arc(x, y, rpx, 0, Math.PI * 2);
       ctx2d.fill();

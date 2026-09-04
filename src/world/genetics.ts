@@ -69,6 +69,9 @@ const GENE_META: Record<GeneName, GeneMeta> = {
   mechanoreceptorCount: { lo: 1, hi: 3, sigmaFactor: 1.2, count: true },
   flagellumCount: { lo: 1, hi: 3, sigmaFactor: 1.2, count: true },
   spikeCount: { lo: 0, hi: 2, sigmaFactor: 1.2, count: true },
+  sizeScale: { lo: 0.6, hi: 1.8, sigmaFactor: 0.3 },
+  hue: { lo: 0, hi: 1, sigmaFactor: 0.15 },
+  adhesion: { lo: 0, hi: 1, sigmaFactor: 0.25 },
 };
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));

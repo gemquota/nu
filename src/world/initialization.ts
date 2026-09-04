@@ -7,7 +7,7 @@ import { RngStreams } from "../kernel/rng";
 import { MODEL_VERSION, SCHEMA_VERSION } from "../kernel/version";
 import { buildBody, randomBrain, TROPHIC_BY_BIAS, BRAIN_INPUTS, type CellNode, type NeuralNet, type TrophicStrategy } from "./body";
 import { buildConstructionModules, constructionTotal as sumConstruction } from "./development";
-import { MAX_PLANT_LEAVES, MIN_PLANT_LEAVES, WATER_SPAWN_PROBABILITY, plantClusterId } from "./plants";
+import { MAX_PLANT_LEAVES, MIN_PLANT_LEAVES, WATER_SPAWN_PROBABILITY, LEAF_MIN_SPACING, leafRingPosition, plantClusterId } from "./plants";
 import { FOUNDER_SEED_MOLECULES, OFFSPRING_SEED_MOLECULES } from "./metabolism";
 import { generateTerrain, DEFAULT_TERRAIN, type TerrainConfig, WALL_HEX_RADIUS, WALL_SPACING, hexagon, axialCentre, Terrain } from "./terrain";
 
@@ -135,6 +135,12 @@ export function randomGenome(rng: RngStreams): Genome {
       mechanoreceptorCount,
       flagellumCount,
       spikeCount,
+      // Cell variability: founders span a size/pigment/adhesion range so the
+      // population is visibly diverse from tick one and evolution has raw
+      // material to select on.
+      sizeScale: 0.75 + u(rng, 0.7),
+      hue: u(rng, 1),
+      adhesion: u(rng, 1) < 0.45 ? 0 : u(rng, 1),
     },
     regulatory: {
       photoreceptorAxis: "speed",
@@ -175,6 +181,7 @@ export function makeOrganism(
   const brain: NeuralNet = options.brain ?? randomBrain(genome, rng);
   const biomass = Math.max(6, energy * 0.6);
   const trophic: TrophicStrategy = TROPHIC_BY_BIAS(genome.genes.trophic);
+  const sizeScale = genome.genes.sizeScale ?? 1;
   const age = options.age ?? 0;
   const maturity = options.maturity ?? 1;
   const developmentCompleted = options.developmentCompleted ?? true;
@@ -207,7 +214,7 @@ export function makeOrganism(
     facing: options.facing ?? rng.next("experiment") * Math.PI * 2,
     trophic,
     biomass,
-    radius: radiusFromBiomass(biomass),
+    radius: radiusFromBiomass(biomass) * sizeScale,
     developmentClock: options.age ?? 0,
     constructionQueue,
     constructionProgress: developmentCompleted ? constructionTotal : 0,
@@ -356,47 +363,54 @@ export function initializeWorld(def: ExperimentDefinition, rng: RngStreams): Wor
     outsidePlants.push({ clusterId, x: 0, y: 0, cx, cy });
   }
 
-  for (const plant of pocketPlants) {
-    const prng = RngStreams.fromSeed(`${plant.clusterId}:body`);
-    const leaves = MIN_PLANT_LEAVES + Math.floor(prng.next("experiment") * (MAX_PLANT_LEAVES - MIN_PLANT_LEAVES + 1));
+  /** Place a leaf cluster at a centre using the even touching-ring layout,
+   * skipping ring sites that land inside solid rock (deterministic take-next). */
+  const plantAt = (
+    clusterId: string,
+    px: number,
+    py: number,
+    leafCount: number,
+    prng: RngStreams,
+  ): void => {
     const plantCapacity = def.config.patchCapacity * (0.8 + 0.3 * prng.next("experiment"));
     const baseRegen = 0.025 + 0.045 * prng.next("experiment");
-    const perLeaf = plantCapacity / leaves;
-    for (let l = 0; l < leaves; l++) {
-      const ang = (l / leaves) * Math.PI * 2 + prng.next("experiment") * 0.6;
-      const rad = 0.8 + prng.next("experiment") * 1.9;
+    const perLeaf = plantCapacity / leafCount;
+    let placed = 0;
+    // Up to a few extra ring slots in case some land inside rock.
+    for (let l = 0; l < leafCount + 3 && placed < leafCount; l++) {
+      const off = leafRingPosition(placed, LEAF_MIN_SPACING);
+      const lx = clamp(px + off.x, 2, def.config.width - 2);
+      const ly = clamp(py + off.y, 2, def.config.height - 2);
+      // A leaf inside a barrier formation is unreachable food rendered under
+      // the terrain — skip the site (deterministically) and keep counting up.
+      if (terrain.blocked(lx, ly)) continue;
       const patch: ResourcePatch = {
         id: nextPatchId(),
-        x: clamp(plant.x + Math.cos(ang) * rad, 2, def.config.width - 2),
-        y: clamp(plant.y + Math.sin(ang) * rad, 2, def.config.height - 2),
+        x: lx,
+        y: ly,
         quantity: perLeaf * (0.4 + 0.6 * prng.next("experiment")),
         regenerationRate: baseRegen * (0.7 + 0.6 * prng.next("experiment")),
-        clusterId: plant.clusterId,
+        clusterId,
         capacity: perLeaf,
       };
       world.resources.set(patch.id, patch);
+      placed++;
     }
+  };
+
+  for (const plant of pocketPlants) {
+    const prng = RngStreams.fromSeed(`${plant.clusterId}:body`);
+    const leaves = MIN_PLANT_LEAVES + Math.floor(prng.next("experiment") * (MAX_PLANT_LEAVES - MIN_PLANT_LEAVES + 1));
+    plantAt(plant.clusterId, plant.x, plant.y, leaves, prng);
   }
   for (const plant of outsidePlants) {
     const prng = RngStreams.fromSeed(`${plant.clusterId}:body`);
     const leaves = MIN_PLANT_LEAVES + Math.floor(prng.next("experiment") * (MAX_PLANT_LEAVES - MIN_PLANT_LEAVES + 1));
-    const plantCapacity = def.config.patchCapacity * (0.8 + 0.3 * prng.next("experiment"));
-    const baseRegen = 0.025 + 0.045 * prng.next("experiment");
-    const perLeaf = plantCapacity / leaves;
-    for (let l = 0; l < leaves; l++) {
-      const ang = (l / leaves) * Math.PI * 2 + prng.next("experiment") * 0.6;
-      const rad = 0.8 + prng.next("experiment") * 1.9;
-      const patch: ResourcePatch = {
-        id: nextPatchId(),
-        x: clamp((plant.cx + 0.35 + prng.next("experiment") * 0.3) * cellSize + (prng.next("experiment") - 0.5) * cellSize * 0.9, 2, def.config.width - 2),
-        y: clamp((plant.cy + 0.35 + prng.next("experiment") * 0.3) * cellSize + (prng.next("experiment") - 0.5) * cellSize * 0.9, 2, def.config.height - 2),
-        quantity: perLeaf * (0.4 + 0.6 * prng.next("experiment")),
-        regenerationRate: baseRegen * (0.7 + 0.6 * prng.next("experiment")),
-        clusterId: plant.clusterId,
-        capacity: perLeaf,
-      };
-      world.resources.set(patch.id, patch);
-    }
+    const jx = (prng.next("experiment") - 0.5) * cellSize * 0.9;
+    const jy = (prng.next("experiment") - 0.5) * cellSize * 0.9;
+    const px = clamp((plant.cx + 0.35 + prng.next("experiment") * 0.3) * cellSize + jx, 2, def.config.width - 2);
+    const py = clamp((plant.cy + 0.35 + prng.next("experiment") * 0.3) * cellSize + jy, 2, def.config.height - 2);
+    plantAt(plant.clusterId, px, py, leaves, prng);
   }
 
   // Founder population. Founders are recorded in the lineage book directly

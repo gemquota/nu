@@ -19,6 +19,7 @@ import { SpatialHash } from "../world/spatial";
 import {
   applyWalls,
   radiusFromBiomass,
+  cellRadius,
   type OrganismRecord,
   type ResourcePatch,
   type World,
@@ -63,10 +64,13 @@ import {
   CLUSTER_MIN_SPACING,
   SPORE_LIFESPAN,
   SPORE_PLANT_LEAVES,
+  SPORE_WIND_SPEED,
+  sporeLifespanFor,
   GROWTH_PROBABILITY,
   EAT_DISLODGE_PROBABILITY,
   makeLeaf,
   makeSpore,
+  leafRingPosition,
   plantClusterId,
 } from "../world/plants";
 import type { ObservationRecord } from "./observations";
@@ -300,6 +304,36 @@ function brainProcess(
   input[INPUT.biomass] = Math.min(1, o.biomass / 60);
   input[INPUT.daylight] = world.daylight();
   input[INPUT.aggression] = Math.max(-1, Math.min(1, o.genome.genes.trophic));
+  // Terrain correlates: cells sense elevation, water depth, and continuous
+  // wall proximity, so gradients (food, pheromone) can be correlated with the
+  // landscape — ridge-following, pool-hunting, wall-hugging strategies can
+  // evolve rather than being hard-coded.
+  input[INPUT.elevation] = Math.min(1, Math.max(0, world.elevationAt(o.x, o.y)));
+  input[INPUT.water] = Math.min(1, world.waterDepthAt(o.x, o.y) / 3);  input[INPUT.wallProximity] = world.wallProximityAt(o.x, o.y, o.radius + 5);
+  // Directional wall gradient (correlate walls): continuous rock-distance
+  // probes on the same axes as the wall-avoidance reflex, so the brain can
+  // evolve wall-following/hugging, not just blind repulsion.
+  {
+    let wgx = 0;
+    let wgy = 0;
+    let wgm = 0;
+    const probe = o.radius + 4;
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      if (world.blocked(o.x + Math.cos(a) * probe, o.y + Math.sin(a) * probe)) {
+        wgx -= Math.cos(a);
+        wgy -= Math.sin(a);
+        wgm += 1;
+      }
+    }
+    if (wgm > 0) {
+      const m = Math.hypot(wgx, wgy);
+      if (m > 1e-3) {
+        input[INPUT.wallX] = wgx / m;
+        input[INPUT.wallY] = wgy / m;
+      }
+    }
+  }
 
   // Recurrent memory: fold the trace into the sensory slots before deciding.
   foldMemory(input, o.memory, [INPUT.light, INPUT.foodX, INPUT.foodY, INPUT.preyX, INPUT.preyY, INPUT.wallX, INPUT.wallY]);
@@ -585,13 +619,18 @@ export class ResolutionSystem implements System {
       if (patch.clusterId && ctx.rng.next("environment") < EAT_DISLODGE_PROBABILITY) {
         const sx = patch.x;
         const sy = patch.y;
+        const dir = ctx.rng.next("environment") * Math.PI * 2;
         const spore = makeSpore(
           `r:spore-e${ctx.tick.toString(36)}-${this.world.resources.size.toString(36)}`,
           sx,
           sy,
-          (ctx.rng.next("environment") - 0.5) * 0.8,
-          (ctx.rng.next("environment") - 0.5) * 0.8,
-          SPORE_LIFESPAN,
+          // Long-range ejection: the dislodged clump is flung a determinstic
+          // 4–7 units/tick in a fresh random direction. Dispersal must carry
+          // spores AWAY from the parent plant, so a stationary carnivore
+          // grazing one plant cannot simply farm the clumps it dislodges.
+          Math.cos(dir) * (4 + ctx.rng.next("environment") * 3),
+          Math.sin(dir) * (4 + ctx.rng.next("environment") * 3),
+          sporeLifespanFor(this.world.config.width, this.world.config.height),
         );
         ctx.assertWrite("resource");
         ctx.stage({ kind: "add", scope: "resource", entity: spore });
@@ -773,14 +812,19 @@ export class PlantEcologySystem implements System {
       cy /= leaves.length;
       const cap = Math.max(2, w === 0 ? 1 : this.world.config.patchCapacity / MAX_CLUSTER_LEAVES);
       if (ctx.rng.next("environment") < SPORE_GROWTH_PROBABILITY) {
-        // Detach a drifting clump (spore) from this plant.
+        // Detach a drifting clump (spore) from this plant. The clump is
+        // flung a deterministic 4–7 units/tick in a fresh random direction —
+        // dispersal carries offspring AWAY from the parent, so a stationary
+        // carnivore cannot camp one plant and farm its clumps.
+        const dir = ctx.rng.next("environment") * Math.PI * 2;
+        const speed = 4 + ctx.rng.next("environment") * 3;
         const spore = makeSpore(
           `r:spore-g${ctx.tick.toString(36)}-${seq.toString(36)}`,
           clamp(cx, 2, w - 2),
           clamp(cy, 2, h - 2),
-          (ctx.rng.next("environment") - 0.5) * 0.9,
-          (ctx.rng.next("environment") - 0.5) * 0.9,
-          SPORE_LIFESPAN,
+          Math.cos(dir) * speed,
+          Math.sin(dir) * speed,
+          sporeLifespanFor(this.world.config.width, this.world.config.height),
         );
         seq++;
         ctx.assertWrite("resource");
@@ -789,20 +833,37 @@ export class PlantEcologySystem implements System {
         this.world.conservation.inflow += spore.quantity;
         ctx.emit("EnvironmentChanged", [], [spore.id], { sporeDislodged: true });
       } else {
-        // Attach a new leaf at the cluster edge. Sample a few candidate spots
-        // and take the first that keeps the requested spacing from existing
-        // leaves (of any cluster), so orbs touch but never pile into a clump.
+        // Attach a new leaf TOUCHING an existing leaf's outer edge: pick a
+        // host leaf (deterministically from the angle draw) and place the
+        // candidate one orb-diameter outward from the centroid through the
+        // host, with a small rotation jitter. Neighbours thus just touch and
+        // never overlap, and the candidate can't collide with the host. A
+        // candidate inside solid rock is skipped — food can't grow in stone.
         const ang = ctx.rng.next("environment") * Math.PI * 2;
-        const rad = LEAF_MIN_SPACING + ctx.rng.next("environment") * 1.4;
-        let lx = clamp(cx + Math.cos(ang) * rad, 2, w - 2);
-        let ly = clamp(cy + Math.sin(ang) * rad, 2, h - 2);
-        if (!spacingOk(lx, ly, leaves, LEAF_MIN_SPACING, spores, CLUSTER_MIN_SPACING)) {
-          // Try a second angle on the opposite side; if that also fails the
-          // cluster is crowded and simply skips growth this tick.
-          lx = clamp(cx + Math.cos(ang + Math.PI) * rad, 2, w - 2);
-          ly = clamp(cy + Math.sin(ang + Math.PI) * rad, 2, h - 2);
-          if (!spacingOk(lx, ly, leaves, LEAF_MIN_SPACING, spores, CLUSTER_MIN_SPACING)) continue;
+        const jit = ctx.rng.next("environment") - 0.5;
+        const host = leaves[Math.floor((ang / (Math.PI * 2)) * leaves.length) % leaves.length]!;
+        let ox = host.x - cx;
+        let oy = host.y - cy;
+        const om = Math.hypot(ox, oy) || 1;
+        ox /= om;
+        oy /= om;
+        const rot = jit * 0.9; // ±0.45 rad around the outward direction
+        const cosR = Math.cos(rot);
+        const sinR = Math.sin(rot);
+        const dx = ox * cosR - oy * sinR;
+        const dy = ox * sinR + oy * cosR;
+        const dist = LEAF_MIN_SPACING + 0.02; // +ε so equality passes spacingOk
+        let lx = clamp(host.x + dx * dist, 2, w - 2);
+        let ly = clamp(host.y + dy * dist, 2, h - 2);
+        let ok = !this.world.blocked(lx, ly) && spacingOk(lx, ly, leaves, LEAF_MIN_SPACING, spores, CLUSTER_MIN_SPACING);
+        if (!ok) {
+          // Second try: rotate the other way around the host; if that also
+          // fails the cluster is crowded (or walled) and skips growth.
+          lx = clamp(host.x + (ox * cosR + oy * sinR) * dist, 2, w - 2);
+          ly = clamp(host.y + (-ox * sinR + oy * cosR) * dist, 2, h - 2);
+          ok = !this.world.blocked(lx, ly) && spacingOk(lx, ly, leaves, LEAF_MIN_SPACING, spores, CLUSTER_MIN_SPACING);
         }
+        if (!ok) { continue; }
         const leaf = makeLeaf(
           `r:leaf-${ctx.tick.toString(36)}-${seq.toString(36)}`,
           leaves[0]!.clusterId!,
@@ -827,9 +888,12 @@ export class PlantEcologySystem implements System {
     let settled = 0;
 
     // Spore drift + settle: clumps drift, then sprout a new plant elsewhere.
+    // Motion = ejection velocity + a per-tick wind wander (deterministic
+    // random walk), so the drift is a roaming flight, not a short coast.
     for (const spore of spores) {
-      const nx = spore.x + (spore.sporeVx ?? 0);
-      const ny = spore.y + (spore.sporeVy ?? 0);
+      const wind = ctx.rng.next("environment") * Math.PI * 2;
+      const nx = spore.x + (spore.sporeVx ?? 0) + Math.cos(wind) * SPORE_WIND_SPEED;
+      const ny = spore.y + (spore.sporeVy ?? 0) + Math.sin(wind) * SPORE_WIND_SPEED;
       ctx.assertWrite("resource.position.x");
       ctx.stage({ kind: "adjust", scope: "resource.position.x", key: spore.id, amount: clamp(nx, 0, w - 1) - spore.x });
       ctx.assertWrite("resource.position.y");
@@ -866,18 +930,54 @@ export class PlantEcologySystem implements System {
           continue;
         }
         settled++;
-        // Settle: sprout a small new plant cluster, remove the spore. Sprout
-        // leaves on the spacing ring so the new plant doesn't start as a clump.
+        // Rock rejection: a spore that lands inside (or brushing) a rock
+        // formation would sprout unreachable food under the terrain. Instead
+        // of dying there, it keeps rolling back along its drift direction and
+        // settles at the first clear site — the plant still disperses, just
+        // never into stone (deterministic, no extra rng draws).
+        let sx = spore.x;
+        let sy = spore.y;
+        if (this.world.blocked(sx, sy)) {
+          const vm = Math.hypot(spore.sporeVx ?? 0, spore.sporeVy ?? 0) || 1;
+          let px = sx;
+          let py = sy;
+          let found = false;
+          for (let n = 1; n <= 12; n++) {
+            px = clamp(sx - ((spore.sporeVx ?? 0) / vm) * n * 3, 2, w - 2);
+            py = clamp(sy - ((spore.sporeVy ?? 0) / vm) * n * 3, 2, h - 2);
+            if (!this.world.blocked(px, py)) { found = true; break; }
+          }
+          if (!found) {
+            // Fully walled in: the spore dies without sprouting.
+            ctx.assertWrite("resource");
+            ctx.stage({ kind: "remove", scope: "resource", id: spore.id });
+            this.world.conservation.outflow += spore.quantity;
+            continue;
+          }
+          sx = px;
+          sy = py;
+        }
+        // Settle: sprout a small new plant cluster, remove the spore. Leaves
+        // sprout on the even touching-ring (adjacent orbs just touch), the
+        // same topology as initialization, so a new plant never starts as a
+        // clump — and each sprout skips sites that land inside solid rock.
         const clusterId = plantClusterId(ctx.tick, seq++);
         const cap = Math.max(2, this.world.config.patchCapacity / MAX_CLUSTER_LEAVES);
-        for (let l = 0; l < SPORE_PLANT_LEAVES; l++) {
-          const ang = (l / SPORE_PLANT_LEAVES) * Math.PI * 2;
-          const rad = LEAF_MIN_SPACING;
+        let sprouted = 0;
+        for (let l = 0; l < SPORE_PLANT_LEAVES + 2 && sprouted < SPORE_PLANT_LEAVES; l++) {
+          const pos = leafRingPosition(sprouted, LEAF_MIN_SPACING);
+          const lx = sx + pos.x;
+          const ly = sy + pos.y;
+          // A sprout inside a rock formation would be unreachable food that
+          // renders under the terrain — skip the site and take the next ring
+          // slot (deterministically) until the cluster is full.
+          if (this.world.blocked(lx, ly)) continue;
+          sprouted++;
           const leaf = makeLeaf(
             `r:leaf-${clusterId}-${l}`,
             clusterId,
-            clamp(spore.x + Math.cos(ang) * rad, 2, w - 2),
-            clamp(spore.y + Math.sin(ang) * rad, 2, h - 2),
+            clamp(lx, 2, w - 2),
+            clamp(ly, 2, h - 2),
             cap,
           );
           ctx.assertWrite("resource");
@@ -889,7 +989,7 @@ export class PlantEcologySystem implements System {
         ctx.stage({ kind: "remove", scope: "resource", id: spore.id });
         // Conservation: the spent spore is returned to the account.
         this.world.conservation.outflow += spore.quantity;
-        ctx.emit("SporeSettled", [], [spore.id], { clusterId, leaves: SPORE_PLANT_LEAVES });
+        ctx.emit("SporeSettled", [], [spore.id], { clusterId, leaves: sprouted });
       }
     }
   }
@@ -916,7 +1016,8 @@ export class PhysicsSystem implements System {
       const mv = m as MoveIntent;
       move.set(mv.actorId, { dx: mv.headingX * mv.speed, dy: mv.headingY * mv.speed });
     }
-    for (const o of this.world.liveOrganisms()) {
+    const live = this.world.liveOrganisms();
+    for (const o of live) {
       const v = move.get(o.id);
       // Water slows locomotion; zones modulate speed further.
       const scale = this.world.zoneEffectsAt(o.x, o.y).speed * this.world.terrainSpeed(o.x, o.y);
@@ -932,6 +1033,60 @@ export class PhysicsSystem implements System {
       const { x, y, edge } = applyWalls(candX, candY, this.world.config);
       if (edge) {
         ctx.emit("WallCollision", [o.id], [], { edge, policy: wallPolicyAt(this.world.config, edge) });
+      }
+      // Adhesion (heritable `adhesion` gene): sticky cells drift toward and
+      // cling to near neighbours. 0 = inert; mid values pull elastically
+      // (spring toward the neighbour, stronger when closer); ≥0.85 locks
+      // rigidly — the cell settles at contact distance and moves with the
+      // neighbour's net motion, so clumps crawl as one body.
+      const adh = o.genome.genes.adhesion ?? 0;
+      if (adh > 0.05) {
+        const idx = this.world.ephemeral.organismIndex;
+        if (idx) {
+          // Bonding radius is CONTACT-scale, not several body widths: adhesion
+          // is a touch sense, so cells only stick when they are actually close
+          // (and rigid bonds need real overlap, not a far-away pull).
+          const senseR = Math.max(cellRadius(o) + cellRadius(o) * 0.5, cellRadius(o) * 2.2);
+          const near = idx.queryNearest({ x: o.x, y: o.y }, senseR);
+          if (near && near.key !== o.id) {
+            const other = this.world.organisms.get(near.key);
+            if (other && other.lifecycle === "ACTIVE") {
+              const rigid = adh >= 0.85;
+              const spring = rigid ? 0.45 : 0.22 * adh;
+              const contact = cellRadius(o) + cellRadius(other);
+              const ux = (near.pos.x - o.x) / Math.max(near.dist, 1e-6);
+              const uy = (near.pos.y - o.y) / Math.max(near.dist, 1e-6);
+              if (rigid) {
+                // Rigid lock: snap to contact distance along the bond axis,
+                // then follow the neighbour's motion (settle, don't oscillate).
+                // The correction is clamped per tick so a stretched bond
+                // reels the cell in instead of teleporting it across a frame.
+                const settle = clamp(near.dist - contact, -2.5, 2.5);
+                const ax = ux * settle * spring;
+                const ay = uy * settle * spring;
+                ctx.assertWrite("organism.position.x");
+                ctx.stage({ kind: "adjust", scope: "organism.position.x", key: o.id, amount: ax });
+                ctx.assertWrite("organism.position.y");
+                ctx.stage({ kind: "adjust", scope: "organism.position.y", key: o.id, amount: ay });
+                if (settle > 0.5) {
+                  // Beyond contact: half-follow the neighbour's motion.
+                  const ov = move.get(other.id);
+                  if (ov) {
+                    ctx.stage({ kind: "adjust", scope: "organism.position.x", key: o.id, amount: ov.dx * 0.5 });
+                    ctx.stage({ kind: "adjust", scope: "organism.position.y", key: o.id, amount: ov.dy * 0.5 });
+                  }
+                }
+              } else if (near.dist > contact * 0.6) {
+                // Elastic: pull toward the neighbour, weaker when closer.
+                const pull = spring * (1 - near.dist / senseR);
+                ctx.assertWrite("organism.position.x");
+                ctx.stage({ kind: "adjust", scope: "organism.position.x", key: o.id, amount: ux * pull });
+                ctx.assertWrite("organism.position.y");
+                ctx.stage({ kind: "adjust", scope: "organism.position.y", key: o.id, amount: uy * pull });
+              }
+            }
+          }
+        }
       }
       ctx.assertWrite("organism.position.x");
       ctx.stage({ kind: "set", scope: "organism.position.x", key: o.id, value: x });
@@ -979,6 +1134,9 @@ export class PhysiologySystem implements System {
       const devScale = phenotypeScale(o.maturity);
       // Bigger bodies cost more to maintain (growth dynamics trade-off).
       const sizeCost = 0.004 * Math.max(0, o.biomass - 12);
+      // Heritable size is a real trade-off: a scaled-up body maintains more
+      // membrane, so upkeep scales super-linearly with the sizeScale gene.
+      const scaleCost = 0.012 * Math.max(0, (o.genome.genes.sizeScale ?? 1) - 1) * (0.5 + 0.5 * o.biomass / 40);
       const moduleUpkeep = 0.01 * o.modules.length * o.genome.genes.metabolism;
       const zoneCost = this.world.zoneEffectsAt(o.x, o.y).metabolicCost;
       // Part 17 §17.1 E3: the temperature field is an environmental law —
@@ -991,7 +1149,8 @@ export class PhysiologySystem implements System {
         (this.world.config.basalCost * o.genome.genes.metabolism) * (0.5 + 0.5 * devScale) * zoneCost * tempMod +
         movement +
         moduleUpkeep +
-        sizeCost;
+        sizeCost +
+        scaleCost;
       ctx.assertWrite("organism.energy");
       ctx.stage({ kind: "adjust", scope: "organism.energy", key: o.id, amount: -cost });
       // Conservation ledger: basal + movement metabolism is a declared outflow.

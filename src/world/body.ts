@@ -47,7 +47,7 @@ export const TROPHIC_BY_BIAS = (bias: number): TrophicStrategy =>
   bias <= -0.33 ? "herbivore" : bias >= 0.33 ? "carnivore" : "generalist";
 
 /** Fixed neural-network topology (input/hidden/output sizes). */
-export const BRAIN_INPUTS = 11;
+export const BRAIN_INPUTS = 14;
 export const BRAIN_HIDDEN = 6;
 export const BRAIN_OUTPUTS = 4;
 export const BRAIN_WEIGHTS = BRAIN_INPUTS * BRAIN_HIDDEN + BRAIN_HIDDEN * BRAIN_OUTPUTS;
@@ -65,6 +65,12 @@ export const INPUT = {
   biomass: 8,
   daylight: 9,
   aggression: 10,
+  /** Terrain correlates: elevation (0..1, higher = higher ground), water
+   * depth (0..1), and continuous wall proximity (0..1). Cells can evolve
+   * preferences for ridges, pools, or open ground. */
+  elevation: 11,
+  water: 12,
+  wallProximity: 13,
 } as const;
 
 /** Brain output index constants. */
@@ -193,6 +199,12 @@ export function randomBrain(genome: { genes: { aggression: number; photoreceptor
   setIH(INPUT.energy, 5, 0.7);
   setHO(5, OUTPUT.speed, 1.4);
   setHO(5, OUTPUT.attack, 0.6 + aggression);
+  // Weak innate terrain prior: cells lean downhill toward water (plants bias
+  // to water in world-gen), and steer away from solid rock — mild weights so
+  // evolution can invert or specialise them freely.
+  setIH(INPUT.elevation, 5, -0.5);
+  setIH(INPUT.water, 5, 0.8);
+  setIH(INPUT.wallProximity, 5, -1.2);
   return { weights: w };
 }
 

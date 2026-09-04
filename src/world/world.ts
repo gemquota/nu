@@ -41,6 +41,15 @@ export function radiusFromBiomass(biomass: number): number {
 }
 
 /**
+ * Effective display/collision radius of a cell: the biomass curve scaled by
+ * the heritable `sizeScale` gene (ProtoEvo cell-size variability). Used by the
+ * renderer and adhesion; the domain stores only biomass + the gene.
+ */
+export function cellRadius(o: { biomass: number; genome: { genes: { sizeScale?: number } } }): number {
+  return radiusFromBiomass(o.biomass) * (o.genome.genes.sizeScale ?? 1);
+}
+
+/**
  * A rectangular region with distinct environmental dynamics. Zones are
  * authoritative configuration (state, not ephemera): they are serialized with
  * the world so checkpoints and branches reproduce them exactly (§12.39).
@@ -151,7 +160,8 @@ export type GeneLayer = "REGULATION" | "MORPHOLOGY" | "NEURAL" | "BEHAVIOUR";
 export type GeneName =
   | "speed" | "senseRadius" | "metabolism" | "reproductionThreshold" | "offspringInvestment"
   | "nodeCount" | "aggression" | "trophic" | "attackPower" | "growthEfficiency" | "daySensitivity"
-  | "photoreceptorCount" | "chemoreceptorCount" | "mechanoreceptorCount" | "flagellumCount" | "spikeCount";
+  | "photoreceptorCount" | "chemoreceptorCount" | "mechanoreceptorCount" | "flagellumCount" | "spikeCount"
+  | "sizeScale" | "hue" | "adhesion";
 
 /** The declared layer registry: which genes live in which layer. */
 export const GENE_LAYERS: Record<GeneLayer, readonly GeneName[]> = {
@@ -169,9 +179,10 @@ export const GENE_LAYERS: Record<GeneLayer, readonly GeneName[]> = {
     "mechanoreceptorCount",
     "flagellumCount",
     "spikeCount",
+    "sizeScale",
   ],
   NEURAL: [],
-  BEHAVIOUR: ["speed", "senseRadius", "aggression", "trophic", "attackPower"],
+  BEHAVIOUR: ["speed", "senseRadius", "aggression", "trophic", "attackPower", "hue", "adhesion"],
 };
 
 /**
@@ -224,6 +235,17 @@ export interface Genome {
     mechanoreceptorCount: number;
     flagellumCount: number;
     spikeCount: number;
+    /** Body-size multiplier (ProtoEvo cell-size variability). Multiplies the
+     * biomass-derived radius; energy costs scale with it, so bigger cells are
+     * a real trade-off, not a free skin. */
+    sizeScale: number;
+    /** Heritable pigment: 0..1 position on the species hue wheel. Purely
+     * visual at this stage (selection does not see colour) but inherited and
+     * mutated, so populations can drift apart visually. */
+    hue: number;
+    /** Cell adhesion: 0 = never sticks, 0.5 = elastic spring when close,
+     * 1 = rigid lock. Drives the physics adhesion behaviour. */
+    adhesion: number;
   };
   /**
    * Part 15 M2 regulatory binding: sensory channel → phenotype axis. Rebound by
@@ -454,6 +476,11 @@ export class World {
     return this.terrain.blocked(x, y);
   }
 
+  /** Approximate clearance (world units) to the nearest barrier tile. */
+  clearanceAt(x: number, y: number, maxR: number, step?: number): number {
+    return this.terrain.clearance(x, y, maxR, step);
+  }
+
   /** Speed multiplier at a point (water slows movement). */
   terrainSpeed(x: number, y: number): number {
     return this.terrain.speedFactor(x, y);
@@ -462,6 +489,30 @@ export class World {
   /** Resource-regeneration multiplier near water. */
   terrainResource(x: number, y: number): number {
     return this.terrain.resourceFactor(x, y);
+  }
+
+  /** Elevation (0..1) at a point — a terrain correlate for sensory input. */
+  elevationAt(x: number, y: number): number {
+    return this.terrain.elevationAt(x, y);
+  }
+
+  /** Water depth (world units) at a point; 0 = dry. */
+  waterDepthAt(x: number, y: number): number {
+    return this.terrain.waterAt(x, y);
+  }
+
+  /**
+   * Continuous wall proximity (0 = open, 1 = touching a barrier) sampled on a
+   * small ring — lets cells evolve wall-hugging or wall-avoiding strategies.
+   */
+  wallProximityAt(x: number, y: number, probe?: number): number {
+    const r = probe ?? 6;
+    let hits = 0;
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      if (this.blocked(x + Math.cos(a) * r, y + Math.sin(a) * r)) hits++;
+    }
+    return hits / 8;
   }
 
   /** Authoritative zone containing (x, y); outermost = plain (§12.13). */
@@ -574,7 +625,7 @@ export class World {
               break;
             case "organism.biomass":
               o.biomass += delta.amount;
-              o.radius = radiusFromBiomass(o.biomass);
+              o.radius = radiusFromBiomass(o.biomass) * (o.genome.genes.sizeScale ?? 1);
               break;
             case "organism.facing":
               o.facing += delta.amount;

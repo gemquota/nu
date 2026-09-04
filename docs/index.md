@@ -61,6 +61,13 @@ The [runtime implementation status](implementation-status.md) is the authoritati
 
 [`src/`](../src) is a TypeScript/Bun implementation of the deterministic kernel and a stage-1 artificial-life null model. It is verified against the invariants in [`tests/`](../tests/kernel.test.ts) and runnable via `bun run src/cli.ts`; the browser lab lives in [`src/web/`](../src/web). See the [runtime implementation status](implementation-status.md) for the full, conservative coverage audit and the [root README](../README.md#implementation) for the source layout.
 
+### V. Planned expansion series
+
+| Series | Scope | Status |
+|---|---|---|
+| [Plant Expansion Series](roadmaps/plant-expansion-series.md) | Four-instalment dev plan: plant physiology → heritable flora → coupled plant–animal ecology → communities & succession | planned |
+| [Plant Series — Combined Edition](roadmaps/plant-expansion-series-combined.md) | One-page version of the above: intro, locked decisions, contents, and full plan | planned |
+
 ## Series conventions
 
 - Parts of the audit use the heading pattern `N.M` (e.g., `3.2 The Simulation Kernel`).

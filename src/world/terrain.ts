@@ -143,6 +143,21 @@ export class Terrain {
     return false;
   }
 
+  /**
+   * Approximate clearance (world units) to the nearest barrier tile: coarse
+   * ring probe (8 directions, `steps` rings). Cheap, deterministic, and good
+   * enough for placement rules (plants sprouting away from rock).
+   */
+  clearance(x: number, y: number, maxR: number, step = 2): number {
+    for (let r = step; r <= maxR; r += step) {
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        if (this.blocked(x + Math.cos(a) * r, y + Math.sin(a) * r)) return r;
+      }
+    }
+    return maxR;
+  }
+
   /** Speed multiplier at a point: water slows, land is neutral. */
   speedFactor(x: number, y: number): number {
     const w = this.waterAt(x, y);
