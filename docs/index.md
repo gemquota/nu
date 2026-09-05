@@ -65,11 +65,14 @@ The [runtime implementation status](implementation-status.md) is the authoritati
 
 | Series | Scope | Status |
 |---|---|---|
-| [Plant Expansion Series](roadmaps/plant-expansion-series.md) | Four-instalment dev plan: plant physiology → heritable flora → coupled plant–animal ecology → communities & succession | planned |
-| [Plant Series — Combined Edition](roadmaps/plant-expansion-series-combined.md) | One-page version of the above: intro, locked decisions, contents, and full plan | planned |
+| [Plant Expansion Series](roadmaps/plant-expansion-series.md) | Four-instalment dev plan (I1–I4) with three interspersed bridge phases (B1–B3): plant physiology → sensing/surface integration → heritable flora → heredity pipeline → coupled plant–animal ecology → economy/environment hardening → communities & succession | planned |
+| [Plant Series — Combined Edition](roadmaps/plant-expansion-series-combined.md) | One-page consolidated edition: intro, locked questionnaire decisions, contents, and the full refined plan (v2) merged into a single file for easy reading and sharing | planned |
+
+> The combined edition is derived from the modular source (`plant-expansion-series.md`) and does not supersede it; edit the source and re-merge rather than editing the combined file directly.
 
 ## Series conventions
 
+- The [Plant Expansion Series](roadmaps/plant-expansion-series.md) is the source of record for plant-layer planning; its [combined edition](roadmaps/plant-expansion-series-combined.md) is a generated one-page view, not an independent document.
 - Parts of the audit use the heading pattern `N.M` (e.g., `3.2 The Simulation Kernel`).
 - Spec parts use `11.x`, `12.x`, `13.x`, etc.
 - ASCII diagrams are preserved from the source where the transcript flattened them; each has been re-flowed into a code block with original structure intact.

@@ -19,6 +19,8 @@
 
 ## Series structure — instalments with interspersed bridge phases
 
+Alongside the seven units, a cross-cutting **Plant Architecture Hardening layer (P0–P5)** runs across the series — see [below](#cross-cutting-hardening-layer--plant-architecture-hardening-p0p5). It is not an eighth instalment: each unit inherits its P-layer obligations as part of that unit's phases.
+
 ```
 I1 Living Physiology ──► B1 Sensing & Surface ──► I2 Heritable Flora ──► B2 Heredity Pipeline
                                                                         ──► I3 Coupled Ecology ──► B3 Economy & Environment ──► I4 Communities & Succession
@@ -216,8 +218,49 @@ The **bridge phases (B1–B3)** are not plant features: each upgrades and integr
 
 ---
 
+## Cross-cutting hardening layer — Plant Architecture Hardening (P0–P5)
+
+> Not new instalments. This layer runs *across* I1–I4 as a discipline each unit must satisfy; the existing series stays the delivery vehicle. It splits the platform into two concurrent tracks: **Architecture (P0–P2)** and **Ecology (I1–I4)**, both feeding **Evolution (B2, I4 observables)**.
+
+```
+PLANT SYSTEM
+       │
+   ┌───┴─────────┐
+   │             │
+ARCHITECTURE  ECOLOGY
+   │             │
+ P0–P2        I1–I4
+   │             │
+   └───┬─────────┘
+       ▼
+   EVOLUTION
+```
+
+| Layer | Scope | How the series already satisfies it / what each unit must add |
+|---|---|---|
+| **P0 — Simulation Contract** | Canonical phase ordering, state ownership, deterministic commit model. | Already owned by the kernel discipline (Part 13, named RNG streams, delta-tracked state). I1.1's `plantClusters` map and every later addition must declare its delta scope. |
+| **P1 — Resource Accounting** | Energy, biomass, molecules — with provenance. | I1.5 and I3's ledger wiring; B3.3's stress harness is the standing enforcement. Provenance: every molecule in a cluster reserve traces to its synthesis debit (I-PLB3.1). |
+| **P2 — Organism Model** | Individual vs cluster semantics, phenotype pipeline, module contracts. | Stage A/B body depth (I1.1, B1.4); the module contract below is P2's forward commitment. |
+| **P3 — Ecological Causality** | Resource competition, feedback, saturation, disturbance, succession inference. | I4.1 competition, I3.5 feedback fields, I4.2 succession. Disturbance → resource/biomass change → *existing* ecological rules → new succession: succession must emerge from the same rules, not from a dedicated succession scheduler. |
+| **P4 — Evolutionary Methodology** | Statistical experiments, ablations, counterfactual replay, genotype→phenotype→fitness tracing. | I2.6 trait tracing, B2.4 interventions/allele series, B3.3 config matrix, I4 acceptance (3-replicate reproducible turnover). |
+| **P5 — Future-Proof Morphology** | Root/module contracts, transport abstraction, local defence, local resource storage. | Forward commitments only — see below. Nothing ships in I1–I4 beyond the contracts. |
+
+### P5 forward commitments (design now, build never-in-this-series)
+
+- **Module ontology reservation.** The Part 15 surface-node architecture is strongly surface/leaf-centric. Reserve these module kinds in the body-module ontology now so roots never require a second plant architecture: `SurfaceModule`, `RootModule`, `TransportModule`, `StorageModule`, `ReproductiveModule`, `DefenceModule`. The eventual physiological architecture is leaf → light / root → water+soil / stem → transport.
+- **Transport as a future slot.** Without transport, every module effectively reads a global energy pool — acceptable for Stage A, but it forecloses emergent morphology from vascular efficiency, transport-distance bottlenecks, and source/sink relations. I1's `photosynthesisInput()` and the cluster pool must be designed so a per-module ledger can replace the global pool later without changing the module contract.
+- **Local defence and storage.** I3's compound reserves are cluster-global; the P5 contract keeps the reserve an inventory keyed so per-module placement can be introduced without a schema break (B3.1's molecule-inventory design is the hook).
+
+### State-discipline rules (apply to every unit)
+
+1. **Mechanism ownership.** Every new state variable declares: who writes it, who reads it, when it can change, which ledger accounts for it, whether it is derivable, persisted, and deterministic. Example — `soilFertility`: writer = environment feedback phase; readers = plant physiology, experiment observer; ledger = nutrient ledger; persistence = yes; update = delta map; derived = no; render = read-only. The Tables in I1–I4 already name writers/files; each unit's tests assert the declaration.
+2. **No hidden state.** Every simulation-relevant variable must exist in authoritative world state or be deterministically derivable from it. No closure variables, module-local timers, renderer state, cached behavioural state, implicit counters, or un-streamed randomness — unless explicitly classified as deterministic caches. This is what keeps rollback, replay, serialization, branching, experiment comparison, and parallel execution sound (Parts 11–13 contracts).
+
+---
+
 ## Series-wide conventions
 
+- **P-layer compliance.** Every unit satisfies the P0–P5 obligations in its own phases (state-discipline rules above); the hardening layer is never a separate deliverable.
 - **Determinism:** no wall-clock or `Math.random`; all stochasticity through named RNG streams; new world state in delta-tracked maps so rollback (K2) stays atomic — the growth-rollback lesson from the last fix cycle is the standing cautionary tale.
 - **Ledger:** every new energy/molecule transfer enters the conservation ledger; a unit isn't done until the B3-style drift stress passes for its features.
 - **Shared machinery:** recombination (B2), the spatial index (B1), environment fields (B3), and the gene registry are implemented *once* and consumed by both kingdoms.
@@ -232,3 +275,4 @@ The **bridge phases (B1–B3)** are not plant features: each upgrades and integr
 2. Every invariant I-PL1.*–I-PL4.* and I-PLB1.*–I-PLB3.* is an automated test in `tests/` and green.
 3. The lab exposes plant physiology, genes, defence overlays, field overlays, and community observables.
 4. `docs/implementation-status.md` Part 17 row describes the coupled flora ecology, with the Coverage tab matching.
+5. Every unit satisfies its P0–P5 obligations: state-discipline rules declared and test-asserted, module ontology reserved (P5 contracts only).
