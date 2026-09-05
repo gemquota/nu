@@ -22,6 +22,7 @@ import type { SpatialHash } from "./spatial";
 import { LineageBook, type LineageNode } from "./lineage";
 import { PheromoneField, MultiField, type SerializedField, type SerializedMultiField, DEFAULT_FIELD_CONFIG, DEFAULT_MULTI_FIELD_CONFIG } from "./field";
 import { Terrain, dayPhase, type SerializedTerrain } from "./terrain";
+import type { PlantClusterState } from "./plants";
 import type { CellNode, NeuralNet, TrophicStrategy } from "./body";
 
 export type LifecycleState = "DEVELOPING" | "ACTIVE" | "DYING" | "DEAD";
@@ -400,6 +401,15 @@ export class World {
   readonly interactions: InteractionRecord[] = [];
   /** Authoritative conservation ledger (Part 17 §17.6, I17-A). */
   conservation: ConservationLedger = { initialEnergy: 0, inflow: 0, outflow: 0 };
+  /**
+   * I1.1 — authoritative per-cluster plant physiology (Stage A hybrid). The
+   * leaves are resource patches sharing a clusterId; the budget (pool, age,
+   * soil, construction queue) lives here so rollback (K2) covers it.
+   * Clusters are created when the first leaf of a cluster is added and
+   * removed when the last leaf goes (grazing/starvation), so the map is
+   * exactly the set of live clusters — no orphan state.
+   */
+  readonly plantClusters = new Map<string, PlantClusterState>();
   /** Ephemeral per-tick buffers (Part 12 §12.24). */
   readonly ephemeral = {
     /** Derived spatial index over resource patches, rebuilt each OBSERVE. */
@@ -701,6 +711,11 @@ export class World {
         brain: { weights: [...o.brain.weights] },
       })),
       resources: [...this.resources.values()].map((r) => ({ ...r })),
+      plantClusters: [...this.plantClusters.values()].map((c) => ({
+        ...c,
+        queue: c.queue.map((q) => ({ ...q })),
+        lastIncome: { ...c.lastIncome },
+      })),
       lineage: this.lineage.serialize(),
       field: this.field.serialize(),
       env: this.env.serialize(),
@@ -723,6 +738,9 @@ export class World {
     world.tick = data.tick;
     for (const o of data.organisms) world.organisms.set(o.id, o as OrganismRecord);
     for (const r of data.resources) world.resources.set(r.id, r as ResourcePatch);
+    // I1.1: pre-plant-physiology checkpoints load without cluster state; the
+    // plant systems lazily backfill clusters (B2.5-style lazy derivation).
+    for (const c of data.plantClusters ?? []) world.plantClusters.set(c.clusterId, c as PlantClusterState);
     world.lineage = LineageBook.restore(data.lineage);
     if (data.env) world.env = MultiField.restore(data.env);
     if (data.interactions) world.interactions.splice(0, world.interactions.length, ...data.interactions);
@@ -737,6 +755,7 @@ export interface SerializedWorld {
   tick: number;
   organisms: OrganismRecord[];
   resources: ResourcePatch[];
+  plantClusters?: PlantClusterState[];
   lineage?: LineageNode[];
   field?: SerializedField;
   env?: SerializedMultiField;

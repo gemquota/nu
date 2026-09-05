@@ -17,17 +17,16 @@ export const MAX_CLUSTER_LEAVES = 6;
 export const MIN_PLANT_LEAVES = 3;
 export const MAX_PLANT_LEAVES = 5;
 /**
- * Leaf fraction below which a leaf stops regrowing — the "wilt line". Only a
- * leaf grazed essentially EMPTY (≤ 6% of its capacity) counts as starved, so
- * light browsing never kills a plant; a hard-camped, emptied leaf accrues
- * depleted ticks and after LEAF_DEPLETION_TICKS the node dies and vanishes —
- * cells eating a plant can consume it away instead of feeding off an
- * infinitely regenerating orb.
+ * Leaf fraction below which a leaf stops regrowing — the "wilt line". Kept as
+ * a pool signal source in I1: a leaf at/below the wilt line is treated as
+ * contributing no income. Retired as a *death* mechanism (I1.4): death is
+ * budget-only via the cluster pool (UPKEEP_STARVATION_TICKS).
  */
 export const LEAF_WILT_FRACTION = 0.06;
 /**
- * Empty-starved ticks before a leaf node dies. Long enough (~1.3 s of sim
- * time) that only a genuinely camped plant loses nodes, never light browsing.
+ * @deprecated I1.4 retired the depletion-tick camping special case. Kept only
+ * as a migration alias; the runtime no longer reads it. Budget-only mortality
+ * (cluster pool starvation) replaced it.
  */
 export const LEAF_DEPLETION_TICKS = 240;
 /** World-unit radius of a leaf orb (small — clusters read as attached orbs). */
@@ -47,6 +46,111 @@ export const CLUSTER_MIN_SPACING = PLANT_ORB_RADIUS * 3.2;
 export const WATER_SPAWN_PROBABILITY = 0.9;
 /** Probability per tick a plant attempts to grow a new leaf. */
 export const GROWTH_PROBABILITY = 0.002;
+/**
+ * I1.3 — Growth is proposal-only: this probability proposes a new leaf; the
+ * cluster's energy pool gates everything. A proposal only queues when the
+ * pool can pay GROWTH_COST plus a reserve for upkeep during maturation.
+ */
+export const GROWTH_RESERVE = 4;
+// ---------------------------------------------------------------------------
+// I1 — Living Physiology: per-cluster budget constants (exported for tests).
+// ---------------------------------------------------------------------------
+/**
+ * I1.2 Multi-field photosynthesis scale: pool income per tick per mature leaf
+ * is PHOTOSYNTHESIS_RATE × leafCapacity × the product of the environment
+ * fields (light, water, soil, chemical modifier). Sampled through
+ * `photosynthesisInput()` so I2 genes can reweight it later.
+ */
+export const PHOTOSYNTHESIS_RATE = 0.028;
+/** I1.3 Energy cost paid from the pool when a queued leaf is *queued*. */
+export const GROWTH_COST = 6;
+/** I1.3 Ticks a queued leaf takes to mature (paid upkeep while building). */
+export const LEAF_MATURATION_TICKS = 90;
+/** I1.4 Upkeep per mature leaf per tick, paid from the cluster pool. */
+export const UPKEEP_PER_LEAF = 0.02;
+/** I1.4 Consecutive ticks the pool can't cover upkeep before a leaf dies. */
+export const UPKEEP_STARVATION_TICKS = 60;
+/** I1.4 Upkeep cost multiplier for a leaf still under construction. */
+export const CONSTRUCTION_UPKEEP_FRACTION = 0.5;
+/** I1.2/I1.4 Soil feedback: pool activity depletes local soil; recovery when idle. */
+export const SOIL_DEPLETION_PER_TICK = 0.00025;
+export const SOIL_RECOVERY_PER_TICK = 0.0004;
+/** Soil fertility floor: income scales with fertility ∈ [SOIL_FLOOR, 1]. */
+export const SOIL_FLOOR = 0.55;
+/**
+ * I1.2 chemical-field contribution: the ambient chemical field at the leaf
+ * nudges income by ±CHEMICAL_INCOME_BIAS (clamped), representing root uptake
+ * of dissolved compounds. Small — the field is a modifier, not a driver.
+ */
+export const CHEMICAL_INCOME_BIAS = 0.1;
+/** Maximum stored energy in a cluster pool (a multiple of one leaf capacity). */
+export const POOL_CAPACITY_LEAVES = 2.5;
+/**
+ * I1.1 — Per-cluster authoritative state (Stage A hybrid). The patch
+ * representation stays the body/edibility substrate; the cluster's physiology
+ * (pool, age, soil, construction queue) lives in a delta-tracked world map
+ * `plantClusters` so rollback semantics match the kernel's double-buffer
+ * discipline. Ownership: written by the plant-physiology phases, read by
+ * consumption (grazed withdrawals), metrics, and the lab (read-only).
+ */
+export interface PlantClusterState {
+  readonly clusterId: string;
+  /** Stored energy pool (the plant's budget: income − upkeep − grazing). */
+  energy: number;
+  /** Age in ticks. */
+  age: number;
+  /** Local soil fertility consumed by this cluster's activity, 0..1. */
+  soilDepletion: number;
+  /**
+   * Construction queue (Part 15 semantics): leaves queued and paid at
+   * GROWTH_COST, maturing over LEAF_MATURATION_TICKS. Each entry is the leaf
+   * id the matured node will use (queue honesty, I-PL1.3).
+   */
+  queue: { readonly leafId: string; readonly ticksLeft: number }[];
+  /** Consecutive ticks the pool failed to cover upkeep (budget-only death). */
+  starvationTicks: number;
+  /** Cumulative per-field income of the last tick (lab readout, presentation-only mirror). */
+  lastIncome: { light: number; water: number; soil: number; chemical: number; total: number };
+}
+
+export function makePlantCluster(clusterId: string, initialEnergy: number): PlantClusterState {
+  return {
+    clusterId,
+    energy: initialEnergy,
+    age: 0,
+    soilDepletion: 0,
+    queue: [],
+    starvationTicks: 0,
+    lastIncome: { light: 0, water: 0, soil: 0, chemical: 0, total: 0 },
+  };
+}
+
+/**
+ * I1.2 — the single sampling helper for multi-field photosynthesis. Every
+ * income computation goes through here so I2 genes can reweight the fields in
+ * one place. Fields: light (day/night daylight()), water (basin proximity via
+ * terrain resource factor), soil (fertility from cluster depletion), chemical
+ * (ambient chemical field as a small clamped modifier).
+ */
+export interface PhotosynthesisInput {
+  readonly light: number;
+  readonly water: number;
+  readonly soil: number;
+  readonly chemical: number;
+}
+
+export function photosynthesisInput(
+  daylightFactor: number,
+  waterFactor: number,
+  soilDepletion: number,
+  chemicalSample: number,
+): PhotosynthesisInput {
+  const light = Math.min(1, Math.max(0, daylightFactor));
+  const water = Math.min(1, Math.max(0, waterFactor));
+  const soil = Math.max(SOIL_FLOOR, 1 - soilDepletion);
+  const chemical = 1 + CHEMICAL_INCOME_BIAS * Math.tanh(chemicalSample);
+  return { light, water, soil, chemical };
+}
 /** Probability a new piece detaches as a spore rather than attaching. */
 export const SPORE_GROWTH_PROBABILITY = 0.1;
 /** Probability being eaten dislodges a spore. */

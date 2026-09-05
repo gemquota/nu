@@ -57,6 +57,8 @@ export class Lab {
   parameters: LabParameters;
   /** Presentation-only selection (§12.44: never authoritative state). */
   selectedId: string | null = null;
+  /** I1.6: presentation-only selected plant cluster (tooltip reads the cluster's pool/income/queue). */
+  selectedClusterId: string | null = null;
   /** Ring-buffer of per-tick metrics for the live charts. */
   readonly history: TickMetrics[] = [];
   /** Cumulative counters for the header readout. */

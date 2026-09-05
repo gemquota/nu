@@ -58,7 +58,6 @@ import {
   MAX_CLUSTER_LEAVES,
   MAX_PLANT_CLUSTERS_SCALE,
   LEAF_WILT_FRACTION,
-  LEAF_DEPLETION_TICKS,
   SPORE_GROWTH_PROBABILITY,
   LEAF_MIN_SPACING,
   CLUSTER_MIN_SPACING,
@@ -68,8 +67,21 @@ import {
   sporeLifespanFor,
   GROWTH_PROBABILITY,
   EAT_DISLODGE_PROBABILITY,
+  PHOTOSYNTHESIS_RATE,
+  GROWTH_COST,
+  GROWTH_RESERVE,
+  LEAF_MATURATION_TICKS,
+  UPKEEP_PER_LEAF,
+  UPKEEP_STARVATION_TICKS,
+  CONSTRUCTION_UPKEEP_FRACTION,
+  SOIL_DEPLETION_PER_TICK,
+  SOIL_RECOVERY_PER_TICK,
+  POOL_CAPACITY_LEAVES,
   makeLeaf,
   makeSpore,
+  makePlantCluster,
+  photosynthesisInput,
+  type PlantClusterState,
   leafRingPosition,
   plantClusterId,
 } from "../world/plants";
@@ -654,15 +666,15 @@ export class ResolutionSystem implements System {
 
     // Regeneration with day/night + terrain (water) modulation: patches grow
     // back toward capacity; food is likelier near water and during daylight.
-    // A leaf grazed below its WILT line stops regrowing and accrues depleted
-    // ticks — eating a plant hard enough withers its nodes away (see the
-    // PlantEcologySystem removal below), so plants are finite, killable food.
+    // I1.4: the depletedTicks camping counter is retired — leaf death is
+    // budget-only (cluster pool starvation in PlantEcologySystem). Wilted
+    // leaves contribute no photosynthesis income while below the wilt line
+    // (pool signal, see the cluster budget loop), so grazing still bites.
     const day = this.world.daylight();
     const dayFactor = 0.5 + 0.6 * day;
     for (const r of this.world.resourceList()) {
       if (r.regenerationRate <= 0) continue;
       const cap = r.capacity ?? this.world.config.patchCapacity;
-      const depleted = r.depletedTicks ?? 0;
       const zone = this.world.zoneEffectsAt(r.x, r.y).resourceRegen;
       const water = this.world.terrainResource(r.x, r.y);
       // Full regeneration (never hard-cuts, so the food web can't crash).
@@ -672,19 +684,6 @@ export class ResolutionSystem implements System {
         ctx.stage({ kind: "adjust", scope: "resource.quantity", key: r.id, amount: regen });
         // Conservation: regeneration is the ecosystem's energy inflow.
         this.world.conservation.inflow += regen;
-      }
-      // Depletion is a NET counter: near-empty ticks earn +1, recovering ticks
-      // decay −1. Only a leaf that is camped (kept empty most of the time)
-      // climbs to LEAF_DEPLETION_TICKS and withers; light browsing never does.
-      const nearEmpty = r.quantity <= Math.max(0.05, cap * LEAF_WILT_FRACTION);
-      if (nearEmpty) {
-        if (depleted < LEAF_DEPLETION_TICKS) {
-          ctx.assertWrite("resource.depletedTicks");
-          ctx.stage({ kind: "adjust", scope: "resource.depletedTicks", key: r.id, amount: 1 });
-        }
-      } else if (depleted > 0) {
-        ctx.assertWrite("resource.depletedTicks");
-        ctx.stage({ kind: "adjust", scope: "resource.depletedTicks", key: r.id, amount: -1 });
       }
     }
 
@@ -733,7 +732,7 @@ export class PlantEcologySystem implements System {
     systemId: "plant-ecology",
     phases: ["RESOLVE"],
     reads: ["resources"],
-    writes: ["resource", "resource.position.x", "resource.position.y", "resource.sporeAge", "resource.quantity"],
+    writes: ["resource", "resource.position.x", "resource.position.y", "resource.sporeAge", "resource.quantity", "plantClusters"],
     stream: "environment",
   };
   constructor(private readonly world: World) {}
@@ -755,23 +754,175 @@ export class PlantEcologySystem implements System {
       }
     }
 
-    // Withering: a leaf grazed empty for LEAF_DEPLETION_TICKS dies and is
-    // removed — the plant node vanishes for good, and a cluster whose leaves
-    // are all eaten away disappears entirely (grazing can clear a plant).
-    // Only active once the ecosystem has settled past the founder wave so
-    // over-grazing can't starve the first generation into extinction.
-    const mature = ctx.tick > 480 && plants.size >= Math.max(8, this.world.config.resourcePatches * 0.5);
-    if (mature) {
-      for (const r of this.world.resources.values()) {
-        if (r.spore || !r.clusterId) continue;
-        if ((r.depletedTicks ?? 0) >= LEAF_DEPLETION_TICKS) {
-          ctx.assertWrite("resource");
-          ctx.stage({ kind: "remove", scope: "resource", id: r.id });
-          // Ledger: whatever food remained in the dead node is lost biomass.
-          if (r.quantity > 0.001) this.world.conservation.outflow += r.quantity;
-          ctx.emit("EnvironmentChanged", [], [r.id], { leafWithered: true, clusterId: r.clusterId });
+    // ------------------------------------------------------------------
+    // I1 — Living Physiology (per-cluster budget).
+    //
+    // Income: multi-field photosynthesis sampled through photosynthesisInput()
+    // (light × water × soil × chemical). Leaves at/below the wilt line
+    // contribute nothing (LEAF_WILT_FRACTION is a pool signal, not a killer).
+    // Upkeep: the pool pays per leaf; failure to pay accrues starvation, and
+    // ONLY pool starvation removes leaves (budget-only mortality — the
+    // LEAF_DEPLETION_TICKS camping special case is retired).
+    // Growth: proposals queue a leaf; queue entries are paid GROWTH_COST up
+    // front and mature over LEAF_MATURATION_TICKS (construction queue).
+    // ------------------------------------------------------------------
+    const day = this.world.daylight();
+    const dayLen = this.world.terrain.config.dayLength;
+    void dayLen;
+    for (const [clusterId, leaves] of plants) {
+      // Lazy backfill: pre-physiology checkpoints (and freshly settled
+      // clusters) derive their state here. Creation energy is a declared
+      // primary-production inflow so the ledger stays closed.
+      let cluster = this.world.plantClusters.get(clusterId);
+      if (!cluster) {
+        const perLeaf = leaves[0]!.capacity ?? this.world.config.patchCapacity;
+        const seed = 0.5 * perLeaf * leaves.length;
+        cluster = makePlantCluster(clusterId, seed);
+        this.world.plantClusters.set(clusterId, cluster);
+        this.world.conservation.inflow += seed;
+      }
+
+      // --- I1.2: multi-field photosynthesis income ---------------------
+      let income = 0;
+      let li = 0, lw = 0, ls = 0, lc = 0;
+      const poolCap = POOL_CAPACITY_LEAVES * (leaves[0]!.capacity ?? this.world.config.patchCapacity);
+      for (const leaf of leaves) {
+        const cap = leaf.capacity ?? this.world.config.patchCapacity;
+        // A leaf grazed to/below its wilt line is not photosynthesizing —
+        // browsing a plant to the bone chokes its income (pool signal).
+        if (leaf.quantity <= Math.max(0.05, cap * LEAF_WILT_FRACTION)) continue;
+        const waterFactor = this.world.terrainResource(leaf.x, leaf.y);
+        const chem = this.world.env.sample("chemical", leaf.x, leaf.y);
+        const input = photosynthesisInput(day, waterFactor, cluster.soilDepletion, chem);
+        const gain = PHOTOSYNTHESIS_RATE * cap * input.light * input.water * input.soil * input.chemical;
+        income += gain;
+        li += input.light; lw += input.water; ls += input.soil; lc += input.chemical;
+      }
+      const applied = Math.min(income, Math.max(0, poolCap - cluster.energy));
+      cluster.energy += applied;
+      // Ledger: photosynthesis is primary production (inflow).
+      if (applied > 1e-9) this.world.conservation.inflow += applied;
+      // Soil feedback: an income-earning cluster depletes local soil; a
+      // starved/idle one lets it recover (clamped 0..1, slow rates).
+      if (income > 1e-9) {
+        cluster.soilDepletion = Math.min(1, cluster.soilDepletion + SOIL_DEPLETION_PER_TICK);
+      } else {
+        cluster.soilDepletion = Math.max(0, cluster.soilDepletion - SOIL_RECOVERY_PER_TICK);
+      }
+      const n = leaves.length;
+      cluster.lastIncome = {
+        light: n > 0 ? li / n : 0,
+        water: n > 0 ? lw / n : 0,
+        soil: n > 0 ? ls / n : 0,
+        chemical: n > 0 ? lc / n : 0,
+        total: applied,
+      };
+
+      // --- I1.4: upkeep paid from the pool; budget-only mortality ------
+      const constructionCount = cluster.queue.length;
+      const upkeep = UPKEEP_PER_LEAF * (leaves.length + CONSTRUCTION_UPKEEP_FRACTION * constructionCount);
+      if (cluster.energy >= upkeep) {
+        cluster.energy -= upkeep;
+        this.world.conservation.outflow += upkeep;
+        cluster.starvationTicks = 0;
+      } else {
+        // Can't fully pay: pay what there is, accrue starvation.
+        this.world.conservation.outflow += cluster.energy;
+        cluster.energy = 0;
+        cluster.starvationTicks += 1;
+        if (cluster.starvationTicks >= UPKEEP_STARVATION_TICKS) {
+          // The pool can no longer sustain the body: shed the weakest leaf
+          // (lowest food, ties by id — deterministic). This is the ONLY
+          // runtime path that removes a leaf (I-PL1.4).
+          let victim: ResourcePatch | null = null;
+          for (const l of leaves) {
+            if (!victim || l.quantity < victim.quantity || (l.quantity === victim.quantity && l.id.localeCompare(victim.id) < 0)) victim = l;
+          }
+          cluster.starvationTicks = 0;
+          if (victim) {
+            ctx.assertWrite("resource");
+            ctx.stage({ kind: "remove", scope: "resource", id: victim.id });
+            if (victim.quantity > 0.001) this.world.conservation.outflow += victim.quantity;
+            ctx.emit("EnvironmentChanged", [], [victim.id], { leafStarved: true, clusterId });
+          }
         }
       }
+
+      // --- I1.3: construction queue maturation -------------------------
+      if (cluster.queue.length > 0) {
+        const stillBuilding: { leafId: string; ticksLeft: number }[] = [];
+        for (const q of cluster.queue) {
+          if (q.ticksLeft > 1) { stillBuilding.push({ leafId: q.leafId, ticksLeft: q.ticksLeft - 1 }); continue; }
+          // Matured: attach the paid-for leaf via the existing edge-attach
+          // + Terrain.clearance siting. The cluster centroid anchors placement.
+          let cx = 0;
+          let cy = 0;
+          for (const l of leaves) { cx += l.x; cy += l.y; }
+          cx /= leaves.length;
+          cy /= leaves.length;
+          const cap = Math.max(2, this.world.config.patchCapacity / MAX_CLUSTER_LEAVES);
+          const ang = (this.world.tick * 0.6180339887 + q.leafId.length) % (Math.PI * 2);
+          const host = leaves[Math.floor((ang / (Math.PI * 2)) * leaves.length) % leaves.length]!;
+          let ox = host.x - cx;
+          let oy = host.y - cy;
+          const om = Math.hypot(ox, oy) || 1;
+          ox /= om; oy /= om;
+          const rot = ((q.leafId.length % 7) / 7 - 0.5) * 0.9;
+          const cosR = Math.cos(rot);
+          const sinR = Math.sin(rot);
+          const dx = ox * cosR - oy * sinR;
+          const dy = ox * sinR + oy * cosR;
+          const dist = LEAF_MIN_SPACING + 0.02;
+          let lx = clamp(host.x + dx * dist, 2, w - 2);
+          let ly = clamp(host.y + dy * dist, 2, h - 2);
+          let ok = !this.world.blocked(lx, ly) && spacingOk(lx, ly, leaves, LEAF_MIN_SPACING, spores, CLUSTER_MIN_SPACING);
+          if (!ok) {
+            lx = clamp(host.x + (ox * cosR + oy * sinR) * dist, 2, w - 2);
+            ly = clamp(host.y + (-ox * sinR + oy * cosR) * dist, 2, h - 2);
+            ok = !this.world.blocked(lx, ly) && spacingOk(lx, ly, leaves, LEAF_MIN_SPACING, spores, CLUSTER_MIN_SPACING);
+          }
+          if (ok) {
+            const leaf = makeLeaf(q.leafId, clusterId, lx, ly, cap);
+            leaves.push(leaf);
+            ctx.assertWrite("resource");
+            ctx.stage({ kind: "add", scope: "resource", entity: leaf });
+            // Conservation: the matured leaf's food is primary production.
+            this.world.conservation.inflow += leaf.quantity;
+            ctx.emit("EnvironmentChanged", [], [leaf.id], { plantGrowth: true, matured: true });
+          }
+          // A site that fails siting costs the queue entry (the paid
+          // GROWTH_COST was already spent — honest accounting, no refund).
+        }
+        cluster.queue = stillBuilding;
+      }
+
+      // --- I1.3: growth proposal (energy-gated) ------------------------
+      if (
+        leaves.length + cluster.queue.length < MAX_CLUSTER_LEAVES &&
+        cluster.queue.length < 2 &&
+        cluster.energy >= GROWTH_COST + GROWTH_RESERVE &&
+        ctx.rng.next("environment") < GROWTH_PROBABILITY
+      ) {
+        // Pay up front and queue — never an instant spawn.
+        cluster.energy -= GROWTH_COST;
+        this.world.conservation.outflow += GROWTH_COST;
+        cluster.queue.push({ leafId: `r:leaf-${clusterId}-${ctx.tick.toString(36)}-${(seq++).toString(36)}`, ticksLeft: LEAF_MATURATION_TICKS });
+      }
+
+      cluster.age += 1;
+
+      // Cluster dissolution: the last leaf gone (grazing/starvation) ends the
+      // cluster; remaining pool is lost biomass (outflow) — no orphans.
+      if (leaves.length === 0) {
+        this.world.conservation.outflow += cluster.energy;
+        this.world.plantClusters.delete(clusterId);
+      }
+    }
+
+    // Drop state for clusters whose leaves all vanished via staged removals
+    // in earlier ticks (map hygiene; leaf-bearing clusters were handled above).
+    for (const id of [...this.world.plantClusters.keys()]) {
+      if (!plants.has(id)) this.world.plantClusters.delete(id);
     }
 
     // Corpse decay: corpses are finite scavenging resources. An unconsumed
@@ -800,85 +951,8 @@ export class PlantEcologySystem implements System {
       }
     }
 
-    // Growth: clusters spawn new attached orbs up to a cap; occasionally a new
-    // piece instead detaches as a drifting spore.
-    for (const [, leaves] of plants) {
-      if (leaves.length >= MAX_CLUSTER_LEAVES) continue;
-      if (ctx.rng.next("environment") >= GROWTH_PROBABILITY) continue;
-      let cx = 0;
-      let cy = 0;
-      for (const l of leaves) { cx += l.x; cy += l.y; }
-      cx /= leaves.length;
-      cy /= leaves.length;
-      const cap = Math.max(2, w === 0 ? 1 : this.world.config.patchCapacity / MAX_CLUSTER_LEAVES);
-      if (ctx.rng.next("environment") < SPORE_GROWTH_PROBABILITY) {
-        // Detach a drifting clump (spore) from this plant. The clump is
-        // flung a deterministic 4–7 units/tick in a fresh random direction —
-        // dispersal carries offspring AWAY from the parent, so a stationary
-        // carnivore cannot camp one plant and farm its clumps.
-        const dir = ctx.rng.next("environment") * Math.PI * 2;
-        const speed = 4 + ctx.rng.next("environment") * 3;
-        const spore = makeSpore(
-          `r:spore-g${ctx.tick.toString(36)}-${seq.toString(36)}`,
-          clamp(cx, 2, w - 2),
-          clamp(cy, 2, h - 2),
-          Math.cos(dir) * speed,
-          Math.sin(dir) * speed,
-          sporeLifespanFor(this.world.config.width, this.world.config.height),
-        );
-        seq++;
-        ctx.assertWrite("resource");
-        ctx.stage({ kind: "add", scope: "resource", entity: spore });
-        // Conservation: the detached clump is new plant biomass.
-        this.world.conservation.inflow += spore.quantity;
-        ctx.emit("EnvironmentChanged", [], [spore.id], { sporeDislodged: true });
-      } else {
-        // Attach a new leaf TOUCHING an existing leaf's outer edge: pick a
-        // host leaf (deterministically from the angle draw) and place the
-        // candidate one orb-diameter outward from the centroid through the
-        // host, with a small rotation jitter. Neighbours thus just touch and
-        // never overlap, and the candidate can't collide with the host. A
-        // candidate inside solid rock is skipped — food can't grow in stone.
-        const ang = ctx.rng.next("environment") * Math.PI * 2;
-        const jit = ctx.rng.next("environment") - 0.5;
-        const host = leaves[Math.floor((ang / (Math.PI * 2)) * leaves.length) % leaves.length]!;
-        let ox = host.x - cx;
-        let oy = host.y - cy;
-        const om = Math.hypot(ox, oy) || 1;
-        ox /= om;
-        oy /= om;
-        const rot = jit * 0.9; // ±0.45 rad around the outward direction
-        const cosR = Math.cos(rot);
-        const sinR = Math.sin(rot);
-        const dx = ox * cosR - oy * sinR;
-        const dy = ox * sinR + oy * cosR;
-        const dist = LEAF_MIN_SPACING + 0.02; // +ε so equality passes spacingOk
-        let lx = clamp(host.x + dx * dist, 2, w - 2);
-        let ly = clamp(host.y + dy * dist, 2, h - 2);
-        let ok = !this.world.blocked(lx, ly) && spacingOk(lx, ly, leaves, LEAF_MIN_SPACING, spores, CLUSTER_MIN_SPACING);
-        if (!ok) {
-          // Second try: rotate the other way around the host; if that also
-          // fails the cluster is crowded (or walled) and skips growth.
-          lx = clamp(host.x + (ox * cosR + oy * sinR) * dist, 2, w - 2);
-          ly = clamp(host.y + (-ox * sinR + oy * cosR) * dist, 2, h - 2);
-          ok = !this.world.blocked(lx, ly) && spacingOk(lx, ly, leaves, LEAF_MIN_SPACING, spores, CLUSTER_MIN_SPACING);
-        }
-        if (!ok) { continue; }
-        const leaf = makeLeaf(
-          `r:leaf-${ctx.tick.toString(36)}-${seq.toString(36)}`,
-          leaves[0]!.clusterId!,
-          lx,
-          ly,
-          cap,
-        );
-        seq++;
-        ctx.assertWrite("resource");
-        ctx.stage({ kind: "add", scope: "resource", entity: leaf });
-        // Conservation: the new leaf's food is primary production (inflow).
-        this.world.conservation.inflow += leaf.quantity;
-        ctx.emit("EnvironmentChanged", [], [leaf.id], { plantGrowth: true });
-      }
-    }
+    // Growth now lives entirely in the per-cluster budget loop above
+    // (I1.3 construction-queue: proposed, paid, matured — never instant).
 
     // Ecosystem ceiling on plant clusters: spores may settle only while the
     // world stays under the cap, so plant biomass (and the population it feeds)
@@ -1642,10 +1716,14 @@ export function computeMetrics(world: World, births: number, deaths: number): Ti
   const sum = (f: (o: OrganismRecord) => number): number =>
     organisms.reduce((acc, o) => acc + f(o), 0);
   const resourceTotal = world.resourceList().reduce((acc, r) => acc + r.quantity, 0);
+  // I1.1: the per-cluster energy pools are authoritative stored energy and
+  // must be counted in the audit (photosynthesis inflow lands there).
+  let poolTotal = 0;
+  for (const c of world.plantClusters.values()) poolTotal += c.energy;
   const fieldTotal = world.field.total();
   const liveIds = organisms.map((o) => o.id);
   const carnivores = organisms.filter((o) => o.trophic === "carnivore").length;
-  const accounted = sum((o) => o.energy) + resourceTotal;
+  const accounted = sum((o) => o.energy) + resourceTotal + poolTotal;
   const ledger = world.conservation;
   const conservationDrift = accounted - (ledger.initialEnergy + ledger.inflow - ledger.outflow);
   const species = clusterSpecies(organisms);

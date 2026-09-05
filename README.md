@@ -21,7 +21,7 @@ The source document contains one part of a 10-part **architectural audit** and t
 - **Architectural Audit** — [`docs/audit/`](docs/audit/00-series-overview.md), Parts 0–10. Part 3 is source-derived; the overview and Parts 1–2, 4–10 are filled-in reconstructions following the series' own announced scopes.
 - **Master Technical Specification** — [`docs/spec/`](docs/spec/00-outline.md). Parts 11–12 are source-derived; Parts 13–19 (kernel, genetics, development, behaviour, ecology, selection, experimentation) are filled-in documents. Their runtime status ranges from implemented to stage-1 partial; Parts 20–39 are not written. See the [roadmap](docs/spec/99-roadmap.md) and [implementation-status audit](docs/implementation-status.md).
 - **Reference** — [`docs/reference/`](docs/reference/protoevo.md): the ProtoEvo ("Simulating an Evolving Microcosmos") system study and its [mapping onto nu's specification](docs/reference/protoevo-to-nu-mapping.md), which feeds concrete mechanisms into the remaining spec parts.
-- **Planned expansion series** — [`docs/roadmaps/plant-expansion-series.md`](docs/roadmaps/plant-expansion-series.md): the four-instalment plant plan (I1–I4) with three interspersed bridge phases (B1–B3), plus its [one-page combined edition](docs/roadmaps/plant-expansion-series-combined.md).
+- **Planned expansion series** — [`docs/roadmaps/plant-expansion-series.md`](docs/roadmaps/plant-expansion-series.md): the four-instalment plant plan (I1–I4) with three interspersed bridge phases (B1–B3), plus its [one-page combined edition](docs/roadmaps/plant-expansion-series-combined.md). The cell-side companion lives at [`docs/roadmaps/cell-expansion-series.md`](docs/roadmaps/cell-expansion-series.md) (C1–C4, bridges K1–K3).
 
 ## Implementation
 

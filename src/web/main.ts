@@ -525,6 +525,21 @@ canvas.addEventListener("pointerdown", (e) => {
     if (d < bestD) { bestD = d; best = o; }
   }
   lab.selectedId = best && bestD < 6 / camera.zoom + 2 ? best.id : null;
+  // I1.6: with no organism under the cursor, fall back to the nearest plant
+  // leaf — selecting a CLUSTER shows the physiology tooltip (pool, per-field
+  // income breakdown, queue depth). Presentation-only: reads world state.
+  if (!lab.selectedId) {
+    let bestLeaf: { id: string; clusterId: string } | null = null;
+    let leafD = Infinity;
+    for (const r of lab.world.resources.values()) {
+      if (!r.clusterId || r.spore) continue;
+      const d = distance(w, r);
+      if (d < leafD) { leafD = d; bestLeaf = { id: r.id, clusterId: r.clusterId }; }
+    }
+    lab.selectedClusterId = bestLeaf && leafD < 6 / camera.zoom + 2 ? bestLeaf.clusterId : null;
+  } else {
+    lab.selectedClusterId = null;
+  }
   updatePanel();
 });
 
@@ -1369,6 +1384,31 @@ function redrawCharts(): void {
 // --------------------------------------------------------------- readouts
 
 function updatePanel(): void {
+  // I1.6: plant-cluster tooltip — pool, per-field income breakdown, queue
+  // depth. Presentation-only projection of authoritative cluster state.
+  if (!lab.selectedId && lab.selectedClusterId) {
+    const cluster = lab.world.plantClusters.get(lab.selectedClusterId);
+    if (!cluster) { lab.selectedClusterId = null; panel.hidden = true; return; }
+    let leaves = 0;
+    for (const r of lab.world.resources.values()) if (r.clusterId === cluster.clusterId) leaves++;
+    const inc = cluster.lastIncome;
+    panel.hidden = false;
+    panelBody.innerHTML = `
+      <div class="sel-head"><b>plant ${cluster.clusterId}</b> · ${leaves} leaves · age ${cluster.age}</div>
+      <div class="sel-quad">
+        <div><span>pool</span><b>${cluster.energy.toFixed(1)}</b></div>
+        <div><span>income</span><b>${inc.total.toFixed(2)}</b></div>
+        <div><span>queue</span><b>${cluster.queue.length}</b></div>
+        <div><span>starve</span><b>${cluster.starvationTicks}</b></div>
+      </div>
+      <div class="node-row" style="--bar:${inc.light.toFixed(2)};--col:#e6bb6f"><span class="node-kind">light</span><span class="node-meta">field factor</span><span class="node-bar" style="background:#e6bb6f"><span style="width:${(inc.light * 100).toFixed(0)}%"></span></span></div>
+      <div class="node-row" style="--bar:${inc.water.toFixed(2)};--col:#83b6e8"><span class="node-kind">water</span><span class="node-meta">field factor</span><span class="node-bar" style="background:#83b6e8"><span style="width:${(inc.water * 100).toFixed(0)}%"></span></span></div>
+      <div class="node-row" style="--bar:${inc.soil.toFixed(2)};--col:#8ed36b"><span class="node-kind">soil</span><span class="node-meta">fertility</span><span class="node-bar" style="background:#8ed36b"><span style="width:${(inc.soil * 100).toFixed(0)}%"></span></span></div>
+      <div class="node-row" style="--bar:${Math.max(0, Math.min(1, (inc.chemical - 0.8) / 0.4)).toFixed(2)};--col:#c69be8"><span class="node-kind">chem</span><span class="node-meta">modifier</span><span class="node-bar" style="background:#c69be8"><span style="width:${(Math.max(0, Math.min(1, (inc.chemical - 0.8) / 0.4)) * 100).toFixed(0)}%"></span></span></div>
+      <div style="color:var(--muted);margin-top:6px">soil depletion ${(cluster.soilDepletion * 100).toFixed(0)}% · building ${cluster.queue.map((q) => `${q.ticksLeft}t`).join(", ") || "—"}</div>
+    `;
+    return;
+  }
   if (!lab.selectedId) { panel.hidden = true; return; }
   const organism = lab.world.organisms.get(lab.selectedId);
   if (!organism || organism.lifecycle === "DEAD") { lab.selectedId = null; panel.hidden = true; return; }
